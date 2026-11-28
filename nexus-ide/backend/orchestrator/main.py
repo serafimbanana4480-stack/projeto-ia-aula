@@ -920,6 +920,9 @@ async def _lifespan_impl(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        from backend.orchestrator.routes.bot_groups import stop_group_runs
+
+        await _safe_shutdown("group_runs", stop_group_runs())
         for task in _background_tasks:
             await _cancel_owned_task(task)
         _background_tasks.clear()

@@ -15,17 +15,16 @@ Provides
 - ``POST /api/swarm/skills/{id}/run``      — run a skill with provided variables
 - ``GET  /api/swarm/workflows``            — list YAML-loaded workflows
 
-Runs are kept in an in-memory store keyed by run_id. In a multi-worker
-deployment swap this for Redis or the existing SQLite store.
+Finished run reports are stored in SQLite under the authenticated owner.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import time
-from collections import deque
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -33,6 +32,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from backend.config.settings import resolve_project_path
 from backend.middleware.auth import require_auth
+from backend.persistence.db import get_db
 from backend.swarm.core.orchestrator import SwarmOrchestrator, SwarmRunRequest
 from backend.swarm.core.types import (
     AgentRole,
@@ -49,38 +49,48 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/swarm", tags=["swarm"])
 
 # ---------------------------------------------------------------------------
-# In-memory run store (replace with persistent store if needed)
+# Owner-scoped run reports
 # ---------------------------------------------------------------------------
 
 _MAX_RUNS = 100
-_runs: deque[dict[str, Any]] = deque(maxlen=_MAX_RUNS)
-_runs_by_id: dict[str, dict[str, Any]] = {}
-_runs_lock = asyncio.Lock()
 
 
-def _save_run(result_dict: dict[str, Any]) -> None:
-    """Append a run, evicting the id-index entry the deque just dropped.
-
-    ``deque(maxlen=...)`` silently discards the oldest item, but the
-    ``_runs_by_id`` mirror had no eviction, so the process leaked one full
-    run payload per request forever. Capture the evicted item and drop it.
-    """
-    evicted: dict[str, Any] | None = None
-    if len(_runs) == _MAX_RUNS:
-        evicted = _runs[0]
-    _runs.append(result_dict)
-    _runs_by_id[result_dict["run_id"]] = result_dict
-    if evicted is not None:
-        _runs_by_id.pop(evicted.get("run_id", ""), None)
-    # Defensive: if anything ever desynchronises the two stores, resync.
-    if len(_runs_by_id) > _MAX_RUNS:
-        live = {r["run_id"] for r in _runs}
-        for stale in [k for k in _runs_by_id if k not in live]:
-            _runs_by_id.pop(stale, None)
+def _owner(user: dict[str, Any]) -> str:
+    owner = str(user.get("user_id") or "").strip()
+    if not owner:
+        raise HTTPException(status_code=401, detail="Authenticated user is missing an id")
+    return owner
 
 
-def _list_runs(limit: int = 20) -> list[dict[str, Any]]:
-    return list(reversed(list(_runs)))[:limit]
+def _save_run(owner: str, payload: dict[str, Any]) -> None:
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO swarm_run_reports (id, user_id, summary_json, payload_json)
+               VALUES (?, ?, ?, ?)""",
+            (payload["run_id"], owner, json.dumps(_summarise_run(payload), ensure_ascii=False),
+             json.dumps(payload, ensure_ascii=False)),
+        )
+
+
+def _list_runs(owner: str, limit: int, *, full: bool = False) -> list[dict[str, Any]]:
+    column = "payload_json" if full else "summary_json"
+    with get_db() as conn:
+        return [
+            json.loads(row[0]) for row in conn.execute(
+                f"""SELECT {column} FROM swarm_run_reports WHERE user_id=?
+                    ORDER BY created_at DESC, rowid DESC LIMIT ?""",
+                (owner, limit),
+            )
+        ]
+
+
+def _get_run(owner: str, run_id: str) -> dict[str, Any] | None:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM swarm_run_reports WHERE user_id=? AND id=?",
+            (owner, run_id),
+        ).fetchone()
+    return dict(json.loads(row[0])) if row else None
 
 
 def _summarise_run(run: dict[str, Any]) -> dict[str, Any]:
@@ -342,9 +352,10 @@ async def _ensure_indexed(project_path: str, enabled: bool) -> int:
 async def run_swarm(
     body: SwarmRunBody,
     request: Request,
-    _user: dict = Depends(require_auth),
+    user: dict[str, Any] = Depends(require_auth),
 ) -> dict[str, Any]:
     """Run a SWARM cycle synchronously (returns the full result)."""
+    owner = _owner(user)
     project_path, _ = resolve_project_path(body.project_path or "")
     orch = await get_orchestrator(request)
     await _ensure_indexed(project_path, body.index_project)
@@ -361,8 +372,7 @@ async def run_swarm(
     )
     result = await orch.run(req)
     payload = result.to_dict()
-    async with _runs_lock:
-        _save_run(payload)
+    await asyncio.to_thread(_save_run, owner, payload)
     return payload
 
 
@@ -370,7 +380,7 @@ async def run_swarm(
 async def list_runs(
     limit: int = 20,
     full: bool = False,
-    _user: dict = Depends(require_auth),
+    user: dict[str, Any] = Depends(require_auth),
 ) -> dict[str, Any]:
     """List recent runs.
 
@@ -378,16 +388,16 @@ async def list_runs(
     complete payloads (previously the only, very heavy, behaviour).
     """
     limit = max(1, min(limit, _MAX_RUNS))
-    runs = _list_runs(limit=limit)
-    return {"runs": runs if full else [_summarise_run(r) for r in runs]}
+    runs = await asyncio.to_thread(_list_runs, _owner(user), limit, full=full)
+    return {"runs": runs}
 
 
 @router.get("/runs/{run_id}")
 async def get_run(
     run_id: str,
-    _user: dict = Depends(require_auth),
+    user: dict[str, Any] = Depends(require_auth),
 ) -> dict[str, Any]:
-    run = _runs_by_id.get(run_id)
+    run = await asyncio.to_thread(_get_run, _owner(user), run_id)
     if run is None:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
     return run
@@ -435,13 +445,16 @@ async def rag_search(
 
 
 @router.get("/dashboard")
-async def dashboard(_user: dict = Depends(require_auth)) -> dict[str, Any]:
+async def dashboard(user: dict[str, Any] = Depends(require_auth)) -> dict[str, Any]:
     """Aggregated metrics for the new dashboard widget."""
     from backend.swarm.memory.memory_layers import get_memory_store
 
     mem = get_memory_store()
     retriever = get_retriever()
-    recent = _list_runs(limit=20)
+    owner = _owner(user)
+    recent = await asyncio.to_thread(_list_runs, owner, 20)
+    with get_db() as conn:
+        total = conn.execute("SELECT COUNT(*) FROM swarm_run_reports WHERE user_id=?", (owner,)).fetchone()[0]
     return {
         "memory": mem.stats(),
         "retriever": retriever.stats(),
@@ -457,7 +470,7 @@ async def dashboard(_user: dict = Depends(require_auth)) -> dict[str, Any]:
             }
             for r in recent
         ],
-        "total_runs": len(_runs),
+        "total_runs": total,
     }
 
 
@@ -503,9 +516,10 @@ async def run_skill(
     skill_id: str,
     body: SkillRunBody,
     request: Request,
-    _user: dict = Depends(require_auth),
+    user: dict[str, Any] = Depends(require_auth),
 ) -> dict[str, Any]:
     """Render the skill's objective template and run a SWARM cycle."""
+    owner = _owner(user)
     skill = get_skill(skill_id) or next((s for s in _all_skills() if s.id == skill_id), None)
     if skill is None:
         raise HTTPException(status_code=404, detail=f"Skill {skill_id} not found")
@@ -548,8 +562,7 @@ async def run_skill(
     payload["skill_id"] = skill_id
     payload["skill_name"] = skill.name
     payload["rendered_objective"] = objective
-    async with _runs_lock:
-        _save_run(payload)
+    await asyncio.to_thread(_save_run, owner, payload)
     return payload
 
 
@@ -573,8 +586,6 @@ async def list_workflows(_user: dict = Depends(require_auth)) -> dict[str, Any]:
 def reset_orchestrator() -> None:
     global _orchestrator
     _orchestrator = None
-    _runs.clear()
-    _runs_by_id.clear()
 
 
 __all__ = ["router", "reset_orchestrator", "get_orchestrator"]

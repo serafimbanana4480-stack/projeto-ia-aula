@@ -246,8 +246,12 @@ class TestSearchAndAnswerHonesty:
         async def duckduckgo_fails(*_args: object, **_kwargs: object) -> list[SearchHit]:
             raise web_search.SearchProviderError("duckduckgo")
 
+        async def bing_fails(*_args: object, **_kwargs: object) -> list[SearchHit]:
+            raise web_search.SearchProviderError("bing")
+
         monkeypatch.setattr(web_search, "_search_brave", brave_fails)
         monkeypatch.setattr(web_search, "_search_duckduckgo", duckduckgo_fails)
+        monkeypatch.setattr(web_search, "_search_bing", bing_fails)
 
         with pytest.raises(web_search.SearchProvidersUnavailable):
             await search_and_answer("provider outage honesty v1", max_results=2)

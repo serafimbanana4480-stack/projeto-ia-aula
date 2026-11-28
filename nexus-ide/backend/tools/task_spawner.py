@@ -48,9 +48,9 @@ async def spawn_task(
             and the primary agent keeps the work.
         context: Additional context to provide to the agent.
         parent_id: Optional ID of the parent task/phase.
-        depends_on: Optional list of task IDs this task depends on. The
-            policy queues the delegation until those are complete, so an
-            unmet dependency is a real gate and not a comment.
+        depends_on: Prerequisite task IDs in a plan. In PRIMARY, use the
+            exact agent and task name (e.g. "ANALYZER:inventory") or its
+            unique short name. A prerequisite must complete before work starts.
         write_scope: Paths this worker may write. Compared by path prefix
             against the scopes the live workers own, so "src/" and
             "src/app.py" are recognised as the same area.
@@ -405,7 +405,10 @@ register_tool(
                 "depends_on": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Optional list of task IDs this task depends on",
+                    "description": (
+                        "Prerequisite IDs in a plan. In PRIMARY use the task name, either "
+                        "AGENT:name or a unique short name. Submit related tasks in one turn."
+                    ),
                 },
                 "write_scope": {
                     "type": "array",

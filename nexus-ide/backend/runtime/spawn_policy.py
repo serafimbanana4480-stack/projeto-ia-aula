@@ -84,12 +84,18 @@ class SpawnPolicy:
     #: Absolute scopes ignore it; relative ones ("src/app.py") are anchored
     #: here so two workers never disagree about what "src/" means.
     scope_root: str = ""
+    active_read_scopes: dict[str, frozenset[str]] = field(default_factory=dict)
 
     @property
     def live_workers(self) -> int:
         return len(self.active_write_scopes)
 
     def evaluate(self, proposal: SubagentProposal) -> SpawnDecision:
+        if self.max_parallel_workers <= 0:
+            return SpawnDecision(
+                SpawnVerdict.PRIMARY_AGENT_ONLY, "delegation is disabled for this run",
+                ("delegation disabled",),
+            )
         failed: list[str] = []
 
         if not proposal.objective.strip():
@@ -98,6 +104,19 @@ class SpawnPolicy:
             failed.append("no definition of done")
         if not proposal.context_ready:
             failed.append("context not ready")
+        if not proposal.requires_deep_exploration and (
+            proposal.estimated_seconds < self.min_useful_seconds
+        ):
+            failed.append(
+                f"estimated {proposal.estimated_seconds:.0f}s < "
+                f"{self.min_useful_seconds:.0f}s spawn overhead"
+            )
+        if failed:
+            return SpawnDecision(
+                verdict=SpawnVerdict.PRIMARY_AGENT_ONLY,
+                reason="the primary agent handles this directly: " + "; ".join(failed),
+                failed_conditions=tuple(failed),
+            )
 
         unmet = proposal.depends_on - self.completed_tasks
         if unmet:
@@ -107,7 +126,7 @@ class SpawnPolicy:
                 failed_conditions=("dependencies not satisfied",),
             )
 
-        conflict = self._write_conflict(proposal.write_scope)
+        conflict = self._write_conflict(proposal)
         if conflict is not None:
             return SpawnDecision(
                 verdict=SpawnVerdict.QUEUE,
@@ -124,22 +143,6 @@ class SpawnPolicy:
                 verdict=SpawnVerdict.PRIMARY_AGENT_ONLY,
                 reason=f"worker {duplicate!r} is already investigating this",
                 failed_conditions=("duplicate work",),
-            )
-
-        if not proposal.requires_deep_exploration and (
-            proposal.estimated_seconds < self.min_useful_seconds
-        ):
-            failed.append(
-                f"estimated {proposal.estimated_seconds:.0f}s < "
-                f"{self.min_useful_seconds:.0f}s spawn overhead"
-            )
-
-        if failed:
-            return SpawnDecision(
-                verdict=SpawnVerdict.PRIMARY_AGENT_ONLY,
-                reason="the primary agent handles this directly: "
-                + "; ".join(failed),
-                failed_conditions=tuple(failed),
             )
 
         if self.live_workers >= self.max_parallel_workers:
@@ -163,20 +166,24 @@ class SpawnPolicy:
     # -- worker bookkeeping -------------------------------------------
     def register(self, proposal: SubagentProposal) -> None:
         self.active_write_scopes[proposal.name] = proposal.write_scope
+        self.active_read_scopes[proposal.name] = proposal.read_scope
         self.active_objectives[proposal.name] = _normalise(proposal.objective)
 
     def release(self, name: str, *, completed: bool = True) -> None:
         self.active_write_scopes.pop(name, None)
+        self.active_read_scopes.pop(name, None)
         self.active_objectives.pop(name, None)
         if completed:
             self.completed_tasks.add(name)
 
     # -- helpers -------------------------------------------------------
-    def _write_conflict(self, write_scope: frozenset[str]) -> str | None:
-        if not write_scope:
-            return None
-        for name, owned in self.active_write_scopes.items():
-            if scopes_overlap(owned, write_scope, self.scope_root):
+    def _write_conflict(self, proposal: SubagentProposal) -> str | None:
+        for name, owned_write in self.active_write_scopes.items():
+            owned_read = self.active_read_scopes.get(name, frozenset())
+            if (
+                scopes_overlap(owned_write, proposal.write_scope | proposal.read_scope, self.scope_root)
+                or scopes_overlap(owned_read, proposal.write_scope, self.scope_root)
+            ):
                 return name
         return None
 

@@ -33,7 +33,7 @@ def auth_client(monkeypatch) -> TestClient:
 
 
 def _install_task_manager(monkeypatch, manager: AutonomousTaskManager) -> AutonomousTaskManager:
-    monkeypatch.setattr(app.state, "task_manager", manager, raising=False)
+    monkeypatch.setitem(app.state._state, "task_manager", manager)
     return manager
 
 
@@ -265,7 +265,7 @@ def test_cancel_endpoint_cancels_a_running_task(auth_client, monkeypatch) -> Non
     assert fetched.status_code == 200
     assert fetched.json()["task"]["status"] == "cancelled"
 
-    # The row is gone from the DB, so a restart cannot resurrect it.
+    # Cancelled rows are excluded from the runnable recovery query.
     assert [r for r in load_scheduled_tasks(source="custom") if r["id"] == task.task_id] == []
     assert auth_client.post("/api/tasks/task-nope/cancel").status_code == 404
 

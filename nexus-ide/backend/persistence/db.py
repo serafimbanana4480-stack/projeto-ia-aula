@@ -474,20 +474,44 @@ def init_db(run_migrations: bool = True) -> None:
 
 
 
+def _default_user_credentials() -> tuple[str, str]:
+    """Return the configured default admin credentials, or two empty strings.
+
+    Use the same dotenv files and precedence as the application settings.
+    An explicitly empty process variable disables its corresponding value.
+    """
+    email = os.environ.get("NEXUS_DEFAULT_EMAIL")
+    password = os.environ.get("NEXUS_DEFAULT_PASSWORD")
+    if email is not None and password is not None:
+        return email, password
+    try:
+        from dotenv import dotenv_values
+
+        from backend.config.settings import Settings
+
+        values: dict[str, str | None] = {}
+        for path in Settings.model_config.get("env_file", ()):
+            values.update({key.upper(): value for key, value in dotenv_values(path).items()})
+        if email is None:
+            email = values.get("NEXUS_DEFAULT_EMAIL")
+        if password is None:
+            password = values.get("NEXUS_DEFAULT_PASSWORD")
+    except (OSError, UnicodeError):
+        logger.debug("Could not read default-user settings from dotenv files")
+    return email or "", password or ""
+
+
 def _seed_default_user() -> None:
     """Create a default admin user if the users table is empty.
 
     Credentials come from the ``NEXUS_DEFAULT_EMAIL`` and
-    ``NEXUS_DEFAULT_PASSWORD`` environment variables. If either is
-    not set, seeding is skipped — no known-password admin account
-    is created.
+    ``NEXUS_DEFAULT_PASSWORD`` environment variables (or the same keys in the
+    repository ``.env``, via the settings layer). If either is not set,
+    seeding is skipped — no known-password admin account is created.
     """
-    import os
-
     import bcrypt
 
-    email = os.environ.get("NEXUS_DEFAULT_EMAIL", "")
-    password = os.environ.get("NEXUS_DEFAULT_PASSWORD", "")
+    email, password = _default_user_credentials()
     if not email or not password:
         logger.info(
             "NEXUS_DEFAULT_EMAIL/NEXUS_DEFAULT_PASSWORD not set — "
@@ -522,13 +546,10 @@ def ensure_dev_default_user() -> dict | None:
     """Ensure a development default user exists when there are no users yet.
 
     Credentials come from ``NEXUS_DEFAULT_EMAIL`` /
-    ``NEXUS_DEFAULT_PASSWORD`` environment variables. If either is
-    not set, returns ``None`` — no known-password admin account is created.
+    ``NEXUS_DEFAULT_PASSWORD`` (environment or repository ``.env``). If either
+    is not set, returns ``None`` — no known-password admin account is created.
     """
-    import os
-
-    default_email = os.environ.get("NEXUS_DEFAULT_EMAIL", "")
-    default_password = os.environ.get("NEXUS_DEFAULT_PASSWORD", "")
+    default_email, default_password = _default_user_credentials()
     if not default_email or not default_password:
         return None
 
@@ -560,9 +581,8 @@ def _seed_default_rbac() -> None:
 
     Idempotent: safe to run multiple times.
     """
-    import os
 
-    admin_email = os.environ.get("NEXUS_DEFAULT_EMAIL", "")
+    admin_email, _ = _default_user_credentials()
     try:
         with sqlite3.connect(str(DB_PATH), timeout=30) as conn:
             conn.executescript("""

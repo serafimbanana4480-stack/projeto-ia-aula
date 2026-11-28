@@ -31,6 +31,7 @@ _IGNORED_PROJECT_DIRS = {
     ".git",
     ".hg",
     ".mypy_cache",
+    ".nexus",
     ".next",
     ".pytest_cache",
     ".ruff_cache",
@@ -110,7 +111,13 @@ def _verify_written(path: Path, expected_content: str) -> dict[str, Any]:
             "skipped": "file too large for verification",
         }
     try:
-        actual = path.read_text(encoding="utf-8")
+        # Preserve newlines: the writer opens with newline="" and writes the
+        # content verbatim, but Path.read_text() applies universal-newline
+        # translation (CRLF -> LF on Windows), so every write-back of a CRLF
+        # file was reported as "content mismatch" even though the file on disk
+        # was correct. Reading with newline="" compares like for like.
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            actual = handle.read()
         if actual == expected_content:
             return {"ok": True, "size": len(actual)}
         return {
@@ -293,6 +300,7 @@ async def write_file_absolute(
     ``overwrite`` defaults to ``True``.  When ``False`` and the file already
     exists, the write is rejected without modifying the existing file.
     """
+    result: dict[str, Any]
     logger.info("write_file_absolute: %s (%d bytes) overwrite=%s", path, len(content), overwrite)
 
     if auth_token is not None:
@@ -505,6 +513,7 @@ async def delete_file_absolute(
     path: str, move_to_trash: bool = True, auth_token: str | None = None
 ) -> dict[str, Any]:
     """Delete a file (absolute path) with optional trash/recovery."""
+    result: dict[str, Any]
     logger.info("delete_file_absolute: %s (trash=%s)", path, move_to_trash)
 
     if auth_token is not None:
@@ -582,6 +591,7 @@ async def delete_dir_absolute(
     ``.nexus/backups/trash/`` so it can be recovered.  Permanent deletion is
     destructive and requires explicit opt-out.
     """
+    result: dict[str, Any]
     logger.info("delete_dir_absolute: %s (trash=%s)", path, move_to_trash)
 
     if auth_token is not None:
@@ -657,6 +667,7 @@ async def delete_dir_absolute(
 
 async def move_file_absolute(src: str, dest: str, auth_token: str | None = None) -> dict[str, Any]:
     """Move or rename a file or directory (absolute paths)."""
+    result: dict[str, Any]
     logger.info("move_file_absolute: %s -> %s", src, dest)
 
     if auth_token is not None:
@@ -697,6 +708,7 @@ async def move_file_absolute(src: str, dest: str, auth_token: str | None = None)
 
 async def copy_file_absolute(src: str, dest: str, auth_token: str | None = None) -> dict[str, Any]:
     """Copy a file (absolute paths).  Directories are not supported."""
+    result: dict[str, Any]
     logger.info("copy_file_absolute: %s -> %s", src, dest)
 
     if auth_token is not None:
@@ -753,7 +765,7 @@ async def get_file_info_absolute(path: str) -> dict[str, Any]:
         stat = await asyncio.to_thread(target.stat)
         is_file = await asyncio.to_thread(target.is_file)
         is_dir = await asyncio.to_thread(target.is_dir)
-        info = {
+        info: dict[str, Any] = {
             "path": str(target),
             "name": target.name,
             "type": "file" if is_file else ("dir" if is_dir else "other"),
@@ -903,6 +915,17 @@ async def search_files_absolute(
                 "--max-filesize",
                 str(MAX_FILE_SIZE_BYTES),
             ]
+            # ripgrep honours .gitignore, but tool-generated directories are
+            # not always ignored (and dot-directories are not "hidden" on
+            # Windows), so a search could match NEXUS's own continuity DB and
+            # backups instead of project code. Exclude the same internal
+            # directories the fallback walker already skips.
+            for ignored in sorted(_IGNORED_PROJECT_DIRS):
+                cmd.extend(["--glob", f"!{ignored}/**"])
+            for prefix in _IGNORED_PROJECT_DIR_PREFIXES:
+                cmd.extend(["--glob", f"!{prefix}*/**"])
+            for suffix in _IGNORED_PROJECT_DIR_SUFFIXES:
+                cmd.extend(["--glob", f"!*{suffix}/**"])
             if glob_pattern:
                 cmd.extend(["--glob", glob_pattern])
             cmd.extend([pattern, str(root)])

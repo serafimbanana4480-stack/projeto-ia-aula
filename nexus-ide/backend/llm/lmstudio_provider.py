@@ -59,10 +59,15 @@ class LMStudioProvider(OpenAIProvider):
 
     DEFAULT_BASE_URL: str = "http://localhost:1234/v1"
 
-    # Set to True by the factory once the local catalog confirms the models —
-    # mirrors the Ollama ``_free_validated`` contract.
-    _free_validated: bool = False
-    _free_candidates: list[str] = []
+    # Factory-populated routing and validation metadata. Annotations live on
+    # the class so manager code can inspect this provider without dynamic attrs.
+    _free_validated: bool
+    _free_candidates: list[str]
+    _catalog: list[Any]
+    quota_available: bool | None
+    validated_at: float | None
+    eligibility_reason: str
+    fallback_model: str | None
 
     def __init__(
         self,
@@ -84,6 +89,13 @@ class LMStudioProvider(OpenAIProvider):
         self._default_model = default_model or str(defaults.get("default_model") or DEFAULT_MODEL)
         self._fast_model = fast_model or str(defaults.get("fast_model") or self._default_model)
         self._coder_model = coder_model or str(defaults.get("coder_model") or self._default_model)
+        self._free_validated = False
+        self._free_candidates = []
+        self._catalog = []
+        self.quota_available = None
+        self.validated_at = None
+        self.eligibility_reason = "not checked"
+        self.fallback_model = None
         super().__init__(
             base_url=base_url,
             api_key=api_key,

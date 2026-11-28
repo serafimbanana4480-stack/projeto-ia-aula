@@ -44,11 +44,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum, StrEnum
+from functools import partial
 from typing import Any
 
 from backend.observability.event_system import Event, EventBus, EventPriority, EventType
 from backend.persistence.db import (
-    delete_scheduled_task,
     get_db,
     load_scheduled_tasks,
     save_scheduled_task,
@@ -139,7 +139,7 @@ def _parse_json(value: Any, default: Any) -> Any:
     return default
 
 
-def _coerce_enum(enum_cls: type[Enum], value: Any, default: Enum) -> Enum:
+def _coerce_enum[T: Enum](enum_cls: type[T], value: Any, default: T) -> T:
     """Coerce a stored string/enum value into *enum_cls*, else *default*."""
     if isinstance(value, enum_cls):
         return value
@@ -149,6 +149,14 @@ def _coerce_enum(enum_cls: type[Enum], value: Any, default: Enum) -> Enum:
         except ValueError:
             return default
     return default
+
+
+def _coerce_int(value: Any, default: int) -> int:
+    """Read persisted integers defensively; corrupt rows fall back safely."""
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
 
 
 @dataclass
@@ -166,7 +174,7 @@ class Task:
     completed_at: datetime | None = None
 
     # Execution
-    handler: Callable | None = None
+    handler: Callable[..., Any] | None = None
     #: Persisted handler name (the ``handler`` column). Callables cannot be
     #: serialised, so this is what a recovered task re-attaches against.
     handler_name: str | None = None
@@ -250,17 +258,17 @@ class TaskScheduler:
         #: The asyncio task currently running each executing task so a RUNNING
         #: task can actually be cancelled (a portmanteau that previously only
         #: forgot its state, leaving the handler to resurrect it as COMPLETED).
-        self._running_asyncio: dict[str, asyncio.Task] = {}
+        self._running_asyncio: dict[str, asyncio.Task[None]] = {}
         self.completed_tasks: list[Task] = []
         self.failed_tasks: list[Task] = []
         #: Recovered-but-dormant tasks that must not run until requeued.
         self._quarantined: set[str] = set()
         #: In-flight retry backoff sleeps, kept strong + cancellable.
-        self._retry_tasks: list[asyncio.Task] = []
+        self._retry_tasks: dict[str, asyncio.Task[None]] = {}
 
         # Scheduling
         self._running = False
-        self._scheduler_task: asyncio.Task | None = None
+        self._scheduler_task: asyncio.Task[None] | None = None
         self._max_concurrent = max_concurrent
         self._cleanup_interval = 300  # 5 minutes
 
@@ -309,8 +317,8 @@ class TaskScheduler:
             parameters=_parse_json(data.get("parameters_json"), {}),
             dependencies=set(_parse_json(data.get("dependencies_json"), [])),
             retry_count=int(data.get("retry_count") or 0),
-            max_retries=data.get("max_retries") if data.get("max_retries") is not None else 3,
-            timeout=data.get("timeout") if data.get("timeout") is not None else 300,
+            max_retries=_coerce_int(data.get("max_retries"), 3),
+            timeout=_coerce_int(data.get("timeout"), 300),
             interval=data.get("interval"),
             auto_retry=bool(data.get("auto_retry", True)),
             result=_parse_json(data.get("result_json"), None),
@@ -400,6 +408,7 @@ class TaskScheduler:
                 logger.info("Recovered task left dormant: %s (%s)", task.name, task.task_id)
                 continue
 
+            assert self.handler_registry is not None
             read_only = self.handler_registry.is_read_only(handler_name)
             # An interrupted task is never auto-run, not even under
             # NEXUS_TASKS_RESUME_PENDING: its handler may have applied half of
@@ -591,15 +600,20 @@ class TaskScheduler:
             self._scheduler_task = None
 
         # Retry backoff sleeps.
-        for retry_task in list(self._retry_tasks):
+        retries = tuple(self._retry_tasks.values())
+        for retry_task in retries:
             retry_task.cancel()
-        if self._retry_tasks:
-            await asyncio.gather(*self._retry_tasks, return_exceptions=True)
+        if retries:
+            await asyncio.gather(*retries, return_exceptions=True)
         self._retry_tasks.clear()
 
         # In-flight executions: cancel the wrappers. Their ``_execute_task``
         # finally frees slots without overwriting a terminal state.
         in_flight = list(self.running_tasks.values())
+        unclaimed = [
+            self.tasks[task_id] for task_id in self._running_asyncio
+            if task_id in self.tasks and self.tasks[task_id].status == TaskStatus.PENDING
+        ]
         executing = list(self._running_asyncio.values())
         for task in executing:
             task.cancel()
@@ -608,6 +622,8 @@ class TaskScheduler:
         self._running_asyncio.clear()
         self.running_tasks.clear()
         self._mark_interrupted(in_flight)
+        self.task_queue.extend(task for task in unclaimed if task not in self.task_queue)
+        self.task_queue.sort(key=lambda task: (self._get_priority_value(task.priority), task.created_at))
         # ``_quarantined`` is intentionally NOT cleared: a task held here must
         # stay held if this same manager is started again, otherwise a
         # shutdown-then-restart would silently run a task twice.
@@ -660,17 +676,16 @@ class TaskScheduler:
             if not task.handler and not task.handler_name:
                 raise ValueError("Task handler is required")
 
+        now = datetime.now()
+        task.updated_at = now
+        # The claim must find a committed row before the queue can dispatch.
+        future = task.scheduled_at is not None and task.scheduled_at > now
+        task.status = TaskStatus.SCHEDULED if future else TaskStatus.PENDING
+        save_scheduled_task(task.to_dict())
         self.tasks[task.task_id] = task
         self.stats["total_tasks"] += 1
         self.stats["scheduled_tasks"] += 1
-
-        now = datetime.now()
-        task.updated_at = now
-        if task.scheduled_at is not None and task.scheduled_at > now:
-            # Future task: wait as SCHEDULED; do not enqueue until it is due.
-            task.status = TaskStatus.SCHEDULED
-        else:
-            task.status = TaskStatus.PENDING
+        if not future:
             self.task_queue.append(task)
 
         # Sort queue by priority then due time.
@@ -682,11 +697,6 @@ class TaskScheduler:
         await self._emit_task_event("task_scheduled", task)
         logger.info(f"Task scheduled: {task.name} ({task.task_id})")
 
-        try:
-            save_scheduled_task(task.to_dict())
-        except Exception as e:
-            logger.warning("Failed to persist task %s: %s", task.task_id, e)
-
         return task.task_id
 
     async def cancel_task(self, task_id: str) -> bool:
@@ -696,15 +706,6 @@ class TaskScheduler:
 
         task = self.tasks[task_id]
 
-        if task.status in (TaskStatus.RUNNING, TaskStatus.RETRYING):
-            async_task = self._running_asyncio.get(task_id)
-            if async_task is not None and not async_task.done():
-                async_task.cancel()
-            if task_id in self.running_tasks:
-                del self.running_tasks[task_id]
-                self.stats["running_tasks"] = max(0, self.stats["running_tasks"] - 1)
-            self._running_asyncio.pop(task_id, None)
-
         # Never resurrect an already-terminal task.
         if task.status in _TERMINAL_STATUSES:
             if task in self.task_queue:
@@ -713,7 +714,14 @@ class TaskScheduler:
 
         task.status = TaskStatus.CANCELLED
         task.completed_at = datetime.now()
-        task.updated_at = datetime.now()
+        task.updated_at = task.completed_at
+        current = asyncio.current_task()
+        handles = [
+            handle for handle in (self._running_asyncio.get(task_id), self._retry_tasks.get(task_id))
+            if handle is not None and handle is not current and not handle.done()
+        ]
+        for handle in handles:
+            handle.cancel()
 
         if task in self.task_queue:
             self.task_queue.remove(task)
@@ -722,13 +730,19 @@ class TaskScheduler:
         if task not in self.completed_tasks:
             self.completed_tasks.append(task)
 
-        await self._emit_task_event("task_cancelled", task)
-        logger.info(f"Task cancelled: {task.name} ({task_id})")
-
         try:
-            delete_scheduled_task(task_id)
+            update_scheduled_task_status(
+                task_id, TaskStatus.CANCELLED.value, completed_at=task.completed_at.isoformat(),
+            )
         except Exception as e:
-            logger.warning("Failed to delete task %s from DB: %s", task_id, e)
+            logger.warning("Failed to persist cancellation for task %s: %s", task_id, e)
+
+        if handles:
+            await asyncio.gather(*handles, return_exceptions=True)
+        if self.running_tasks.pop(task_id, None) is not None:
+            self.stats["running_tasks"] = max(0, self.stats["running_tasks"] - 1)
+        await self._emit_task_event("task_cancelled", task)
+        logger.info("Task cancelled: %s (%s)", task.name, task_id)
 
         return True
 
@@ -897,12 +911,13 @@ class TaskScheduler:
 
     async def _process_pending_tasks(self) -> None:
         """Process pending tasks in the queue."""
-        while (self.task_queue and
-               len(self.running_tasks) < self._max_concurrent and
-               self._running):
-
+        # Reserve slots when dispatching, before the new coroutine owns a DB claim.
+        for _ in range(len(self.task_queue)):
+            if not self._running or len(self._running_asyncio) >= self._max_concurrent:
+                break
             task = self.task_queue.pop(0)
-
+            if task.status in _TERMINAL_STATUSES or task.task_id in self._running_asyncio:
+                continue
             if task.task_id in self._quarantined:
                 # Safety net: a quarantined task never enters execution.
                 task.status = TaskStatus.WAITING
@@ -910,10 +925,18 @@ class TaskScheduler:
 
             if not await self._check_dependencies(task):
                 self.task_queue.append(task)
-                break
+                continue
 
             async_task = asyncio.create_task(self._execute_task(task))
             self._running_asyncio[task.task_id] = async_task
+            async_task.add_done_callback(partial(self._forget_worker, self._running_asyncio, task.task_id))
+
+    @staticmethod
+    def _forget_worker(
+        workers: dict[str, asyncio.Task[None]], task_id: str, finished: asyncio.Task[None],
+    ) -> None:
+        if workers.get(task_id) is finished:
+            workers.pop(task_id, None)
 
     async def _process_scheduled_tasks(self) -> None:
         """Promote SCHEDULED tasks whose due time has arrived to PENDING."""
@@ -958,13 +981,12 @@ class TaskScheduler:
         task.updated_at = task.started_at
         self.running_tasks[task.task_id] = task
         self.stats["running_tasks"] += 1
-        self._running_asyncio[task.task_id] = asyncio.current_task()
-
-        await self._emit_task_event("task_started", task)
-
-        start_time = time.time()
+        if (current := asyncio.current_task()) is not None:
+            self._running_asyncio[task.task_id] = current
 
         try:
+            await self._emit_task_event("task_started", task)
+            start_time = time.time()
             try:
                 result = await self._invoke_handler(task)
             except asyncio.CancelledError:
@@ -998,9 +1020,7 @@ class TaskScheduler:
 
         Returns ``True`` when this worker owns the run. ``False`` means another
         worker already started this task, or it already finished. A task that
-        is not persisted at all (in-memory only) has nothing to claim and is
-        allowed through, as is a database failure: availability over a strict
-        guarantee the queue already made.
+        is not persisted at all (in-memory only) has nothing to claim.
         """
         placeholders = ", ".join("?" for _ in _CLAIMABLE_DB_STATUSES)
         statement = (
@@ -1023,7 +1043,7 @@ class TaskScheduler:
                 return persisted is None
         except Exception as e:
             logger.warning("Failed to claim task %s for execution: %s", task.task_id, e)
-            return True
+            return False
 
     def _defer_claimed_elsewhere(self, task: Task) -> None:
         """Park a task another worker owns so it is not re-queued forever."""
@@ -1144,13 +1164,16 @@ class TaskScheduler:
             logger.warning("Failed to persist retry state %s: %s", task.task_id, e)
 
         retry_task = asyncio.create_task(self._retry_after_backoff(task, backoff))
-        self._retry_tasks.append(retry_task)
+        self._retry_tasks[task.task_id] = retry_task
+        retry_task.add_done_callback(partial(self._forget_worker, self._retry_tasks, task.task_id))
 
     async def _retry_after_backoff(self, task: Task, backoff: int) -> None:
         """Sleep the backoff *outside* the running slot, then re-enqueue."""
         try:
             await asyncio.sleep(backoff)
         except asyncio.CancelledError:
+            return
+        if task.status != TaskStatus.RETRYING:
             return
 
         task.status = TaskStatus.PENDING
@@ -1176,17 +1199,28 @@ class TaskScheduler:
 
     async def _check_dependencies(self, task: Task) -> bool:
         """Check if task dependencies are satisfied."""
+        missing = []
         for dep_id in task.dependencies:
             dep_task = self.tasks.get(dep_id)
             if not dep_task:
-                logger.error(f"Dependency not found: {dep_id}")
+                missing.append(dep_id)
+            elif dep_task.status != TaskStatus.COMPLETED:
                 return False
-
-            if dep_task.status not in [TaskStatus.COMPLETED]:
-                logger.info(f"Dependency not ready: {dep_id} (status: {dep_task.status.value})")
-                return False
-
-        return True
+        if not missing:
+            return True
+        # Startup loads runnable work only. Completed dependencies can still
+        # be satisfied by their durable rows after a restart or cache cleanup.
+        placeholders = ",".join("?" for _ in missing)
+        try:
+            with get_db() as conn:
+                completed = conn.execute(
+                    f"SELECT id FROM scheduled_tasks WHERE status='completed' AND id IN ({placeholders})",
+                    missing,
+                ).fetchall()
+        except Exception:
+            logger.warning("Could not resolve durable dependencies for task %s", task.task_id, exc_info=True)
+            return False
+        return {row["id"] for row in completed}.issuperset(missing)
 
     async def _schedule_recurring_task(self, task: Task) -> None:
         """Schedule the next run of a recurring task, respecting its interval."""
@@ -1240,7 +1274,7 @@ class TaskScheduler:
             logger.info(f"Cleaned up {len(old_tasks)} old tasks")
 
     def _get_priority_value(self, priority: TaskPriority) -> int:
-        """Get numeric value for priority."""
+        """Sort urgent work before lower-priority entries."""
         priority_values = {
             TaskPriority.LOW: 1,
             TaskPriority.NORMAL: 2,
@@ -1248,7 +1282,7 @@ class TaskScheduler:
             TaskPriority.CRITICAL: 4,
             TaskPriority.URGENT: 5
         }
-        return priority_values.get(priority, 2)
+        return -priority_values.get(priority, 2)
 
     async def _emit_task_event(self, event_type: str, task: Task) -> None:
         """Emit a task-related event with the correct canonical EventType."""
@@ -1291,7 +1325,7 @@ class AutonomousTaskManager:
         self._running = False
 
     @property
-    def task_handlers(self) -> dict[str, Callable]:
+    def task_handlers(self) -> dict[str, Callable[..., Any]]:
         """Backwards-compatible view of the registered handlers."""
         return self.handlers.callables()
 
@@ -1360,7 +1394,7 @@ class AutonomousTaskManager:
         logger.info("Built-in autonomous tasks scheduled")
 
     async def create_custom_task(self, name: str, task_type: TaskType,
-                           handler: Callable | None = None,
+                           handler: Callable[..., Any] | None = None,
                            handler_name: str | None = None,
                            parameters: dict[str, Any] | None = None,
                            priority: TaskPriority = TaskPriority.NORMAL,
@@ -1375,7 +1409,7 @@ class AutonomousTaskManager:
         so the task survives a restart) or falls back to a live ``handler``.
         """
         resolved_name = handler_name
-        resolved_handler: Callable | None = None
+        resolved_handler: Callable[..., Any] | None = None
         if resolved_name is not None:
             entry = self.handlers.resolve(resolved_name)
             if entry is None:
@@ -1419,7 +1453,7 @@ class AutonomousTaskManager:
         return await self.scheduler.requeue_task(task_id)
 
     # -- Built-in handlers ------------------------------------------------
-    async def _health_monitoring_handler(self, **kwargs) -> dict[str, Any]:
+    async def _health_monitoring_handler(self, **kwargs: Any) -> dict[str, Any]:
         """Read-only health check backed by real system metrics (psutil)."""
         detailed = bool(kwargs.get("detailed", False))
         metrics = await asyncio.to_thread(self._collect_system_metrics)
@@ -1461,7 +1495,7 @@ class AutonomousTaskManager:
     @staticmethod
     def _collect_system_metrics() -> dict[str, Any]:
         """Collect system metrics synchronously (run via ``asyncio.to_thread``)."""
-        import psutil
+        import psutil  # type: ignore[import-untyped]
 
         cpu = psutil.cpu_percent(interval=None)
         vm = psutil.virtual_memory()
@@ -1480,7 +1514,7 @@ class AutonomousTaskManager:
             "uptime_seconds": round(uptime, 2) if uptime is not None else None,
         }
 
-    async def _system_cleanup_handler(self, **kwargs) -> dict[str, Any]:
+    async def _system_cleanup_handler(self, **kwargs: Any) -> dict[str, Any]:
         """Real cleanup: prune structured logs older than the retention window."""
         deep_clean = bool(kwargs.get("deep_clean", False))
         retention_days = 7 if deep_clean else 30

@@ -76,6 +76,22 @@ class TestSharedMemory:
         assert entries[0].topic == "bug.discovery"
 
     @pytest.mark.asyncio
+    async def test_tag_filter_applies_before_limit_and_keeps_owner_scope(self):
+        from backend.persistence.db import get_db
+
+        shm = get_shared_memory()
+        wanted = await shm.write_entry("CODER", "notes", "earliest", tags=["pytest"], user_id="alice")
+        await shm.write_entry("ANALYZER", "notes", "newest", tags=["ui"], user_id="alice")
+        await shm.write_entry("CODER", "notes", "different owner", tags=["pytest"], user_id="bob")
+        with get_db() as conn:
+            conn.execute(
+                "UPDATE whiteboard_entries SET timestamp=? WHERE entry_id=?",
+                (datetime(2025, 1, 1, tzinfo=UTC).isoformat(), wanted.entry_id),
+            )
+        entries = await shm.read_entries(tags=["pytest"], user_id="alice", limit=1)
+        assert [entry.entry_id for entry in entries] == [wanted.entry_id]
+
+    @pytest.mark.asyncio
     async def test_search_entries(self, tmp_path, monkeypatch):
         monkeypatch.setattr("backend.persistence.db.DB_PATH", tmp_path / "test.db")
         from backend.persistence.db import init_db

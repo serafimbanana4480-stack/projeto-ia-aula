@@ -28,6 +28,7 @@ from backend.llm.model_catalog import (
     invalidate_cache,
     list_provider_specs,
     load_validated_models,
+    resolve_credentials,
     validate_api_key,
 )
 from backend.llm.multi_llm_manager import MultiLLMManager
@@ -149,7 +150,13 @@ async def list_providers(_user: dict = Depends(require_auth)) -> dict:
         requires_key = bool(pcfg.get("requires_api_key", False))
         key_attr = f"{key}_api_key"
         api_key = getattr(settings, key_attr, "") if requires_key else None
-        health_tasks.append(_check_provider_health(pcfg.get("base_url", ""), key, api_key))
+        # The runtime adapter uses the settings value (LMSTUDIO_HOST,
+        # OLLAMA_HOST, …); probing only config/models.yaml reported a reachable
+        # provider as offline whenever the two differed.
+        _, base_url = resolve_credentials(key)
+        health_tasks.append(
+            _check_provider_health(base_url or pcfg.get("base_url", ""), key, api_key)
+        )
 
     health_results = await asyncio.gather(*health_tasks, return_exceptions=True)
 
@@ -165,11 +172,12 @@ async def list_providers(_user: dict = Depends(require_auth)) -> dict:
             health if isinstance(health, dict) else {"status": "error", "error": str(health)}
         )
 
+        _, resolved_base = resolve_credentials(key)
         result.append(
             {
                 "id": key,
                 "name": pcfg.get("name", key),
-                "base_url": pcfg.get("base_url", ""),
+                "base_url": resolved_base or pcfg.get("base_url", ""),
                 "default_models": pcfg.get("default_models", []),
                 "requires_api_key": requires_key,
                 "api_key_set": api_key_set,

@@ -19,6 +19,7 @@ from backend.core.skill_runtime import (
     clear_skill_cache,
     list_skill_summaries,
     promote_skill,
+    record_skill_outcome,
     reset_skill_metrics,
     select_skills,
     select_skills_for_agent,
@@ -119,6 +120,19 @@ def test_seeded_skills_can_be_selected(monkeypatch: pytest.MonkeyPatch) -> None:
         assert expected not in {
             entry["name"] for entry in result["rejected"]
         }, result["rejected"]
+
+
+def test_context_budget_never_delivers_only_a_skill_header(skills_root: Path) -> None:
+    _write_active_skill(skills_root, "small-budget")
+    result = select_skills("alpha task", None, max_chars=20, include_memory=False)
+    assert result["context"] == ""
+    assert result["skills"] == []
+    assert result["skipped"]["small-budget"] == "context_budget"
+
+
+def test_failed_skill_measurement_is_zero_not_unknown(skills_root: Path) -> None:
+    result = record_skill_outcome("test-skill", False)
+    assert result["success_rate"] == 0.0
 
 
 def test_promotion_gate_matches_the_selection_surface(

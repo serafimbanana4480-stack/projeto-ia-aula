@@ -36,10 +36,12 @@ class NexusPrimaryAgent(AgentBase):
     supported_actions = {
         # observe
         AgentAction.READ_FILE,
+        AgentAction.READ_MULTIPLE_FILES,
         AgentAction.READ_FILE_ABSOLUTE,
         AgentAction.LIST_DIR,
         AgentAction.LIST_DIR_ABSOLUTE,
         AgentAction.SEARCH_CODEBASE,
+        AgentAction.SEARCH_IN_FILES,
         AgentAction.SEARCH_SYMBOLS,
         AgentAction.INDEX_SYMBOLS,
         AgentAction.READ_DOCS,
@@ -53,6 +55,7 @@ class NexusPrimaryAgent(AgentBase):
         AgentAction.MCP_BUILDER,
         # act
         AgentAction.WRITE_FILE,
+        AgentAction.EDIT_FILE,
         AgentAction.WRITE_FILE_ABSOLUTE,
         AgentAction.EXECUTE_CODE,
         AgentAction.RUN_SHELL,
@@ -64,6 +67,7 @@ class NexusPrimaryAgent(AgentBase):
         AgentAction.TYPE_CHECK,
         # reach out
         AgentAction.SEARCH_WEB,
+        AgentAction.DEEP_RESEARCH,
         AgentAction.FETCH_URL,
         AgentAction.SEARCH_DOCS,
         AgentAction.STORE_MEMORY,

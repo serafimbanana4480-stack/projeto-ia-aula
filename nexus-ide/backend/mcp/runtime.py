@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 SESSION_IDLE_TTL = float(os.environ.get("NEXUS_MCP_SESSION_TTL", "120"))
 _MAX_TIMEOUT = 60.0
+_MAX_TOOL_PAGES = 32
 
 _SESSION_TIMEOUT_MESSAGES = (
     "connection closed",
@@ -95,6 +96,10 @@ def _validated_tools(result: Any) -> tuple[dict[str, dict[str, Any]], dict[str, 
     for tool in getattr(result, "tools", ()):
         payload = _tool_payload(tool)
         name = payload["name"]
+        if name in tools or name in rejected:
+            tools.pop(name, None)
+            rejected[name] = "nome de tool duplicado"
+            continue
         if not is_valid_tool_name(name):
             rejected[name] = "nome de tool inválido"
             continue
@@ -103,6 +108,29 @@ def _validated_tools(result: Any) -> tuple[dict[str, dict[str, Any]], dict[str, 
             continue
         tools[name] = payload
     return tools, rejected
+
+
+async def _discover_tools(session: Any) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+    available: dict[str, dict[str, Any]] = {}
+    rejected: dict[str, str] = {}
+    seen_cursors: set[str] = set()
+    cursor: str | None = None
+    for _ in range(_MAX_TOOL_PAGES):
+        page = await (session.list_tools() if cursor is None else session.list_tools(cursor=cursor))
+        tools, refused = _validated_tools(page)
+        duplicates = (available.keys() | rejected.keys()) & (tools.keys() | refused.keys())
+        available.update(tools)
+        rejected.update(refused)
+        for name in duplicates:
+            available.pop(name, None)
+            rejected[name] = "nome de tool duplicado"
+        cursor = getattr(page, "nextCursor", None)
+        if cursor is None:
+            return available, rejected
+        if not isinstance(cursor, str) or cursor in seen_cursors:
+            raise MCPRuntimeError("Paginação inválida na lista de ferramentas MCP.")
+        seen_cursors.add(cursor)
+    raise MCPRuntimeError("O conector excedeu o limite de páginas de ferramentas MCP.")
 
 
 def _tool_payload(tool: Any) -> dict[str, Any]:
@@ -397,11 +425,14 @@ async def close_all_sessions() -> None:
     _session_locks.clear()
 
 
-async def _with_session(connector: MCPConnector, operation: Callable[[Any], Awaitable[Any]], *, timeout: float) -> Any:
+async def _with_session(
+    connector: MCPConnector, operation: Callable[[Any], Awaitable[Any]], *, timeout: float,
+    may_replay: Callable[[], bool] | None = None,
+) -> Any:
     """Run ``operation`` against a live (cached) session for *connector*.
 
     A transport-level failure (process died, pipe broken) invalidates the
-    cached session and retries once on a fresh one before surfacing the error.
+    cached session. Safe operations may be tried once on a fresh session.
     """
     await _sweep_idle_sessions()
     for attempt in (1, 2):
@@ -413,13 +444,22 @@ async def _with_session(connector: MCPConnector, operation: Callable[[Any], Awai
             )
         except TimeoutError as exc:
             await _discard_session(entry)
+            if may_replay is not None and not may_replay():
+                raise MCPRuntimeError(
+                    "O MCP excedeu o timeout após o envio da chamada. O resultado é desconhecido."
+                ) from exc
             raise MCPRuntimeError(f"MCP excedeu o timeout de {timeout:.0f}s") from exc
         except MCPRuntimeError:
             raise
         except Exception as exc:  # transport failures may be nested in ExceptionGroups
-            if attempt == 1 and (not entry.is_alive() or _is_transport_failure(exc)):
+            if not entry.is_alive() or _is_transport_failure(exc):
                 await _discard_session(entry)
-                continue
+                if may_replay is not None and not may_replay():
+                    raise MCPRuntimeError(
+                        "A ligação MCP caiu após o envio da chamada. O resultado é desconhecido."
+                    ) from exc
+                if attempt == 1:
+                    continue
             # The transport can echo the connector's credentials (an
             # "Unauthorized: <token>" body, a command line in the error),
             # so the detail is redacted before it reaches the model.
@@ -434,8 +474,7 @@ async def list_connector_tools(connector: MCPConnector, *, timeout: float = 35.0
     Tools with an illegal name or a malformed ``inputSchema`` are refused:
     NEXUS could not validate the arguments it forwards for them.
     """
-    result = await _with_session(connector, lambda session: session.list_tools(), timeout=timeout)
-    tools, rejected = _validated_tools(result)
+    tools, rejected = await _with_session(connector, _discover_tools, timeout=timeout)
     if rejected:
         logger.warning(
             "MCP connector %s advertised %d invalid tool(s): %s",
@@ -503,9 +542,11 @@ async def call_connector_tool(
                 parts.append(str(structured))
         return "; ".join(parts)[:600]
 
+    dispatched = False
+
     async def operation(session: Any) -> Any:
-        tools = await session.list_tools()
-        available, rejected = _validated_tools(tools)
+        nonlocal dispatched
+        available, rejected = await _discover_tools(session)
         if tool_name in rejected:
             raise MCPRuntimeError(
                 f"Tool MCP '{tool_name}' foi rejeitada pelo NEXUS: {rejected[tool_name]}"
@@ -526,11 +567,14 @@ async def call_connector_tool(
             raise MCPRuntimeError(
                 f"Argumentos inválidos para a tool MCP '{tool_name}': {'; '.join(root_violations[:5])}"
             )
+        dispatched = True
         return await session.call_tool(tool_name, arguments=args)
 
     recorded = False
     try:
-        result = await _with_session(connector, operation, timeout=timeout)
+        result = await _with_session(
+            connector, operation, timeout=timeout, may_replay=lambda: not dispatched,
+        )
         elapsed_ms = (asyncio.get_running_loop().time() - started) * 1000
         payload = {
             "isError": bool(getattr(result, "isError", False)),

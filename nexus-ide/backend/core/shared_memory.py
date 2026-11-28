@@ -208,15 +208,8 @@ class SharedMemory:
     ) -> list[WhiteboardEntry]:
         """Read whiteboard entries with optional filtering."""
         await self._ensure_init()
-        rows = await asyncio.to_thread(self._fetch_entries, topic, agent, since, limit, user_id)
-
-        results: list[WhiteboardEntry] = []
-        for row in rows:
-            entry = self._row_to_entry(row)
-            if tags and not any(t in entry.tags for t in tags):
-                continue
-            results.append(entry)
-        return results[:limit]
+        rows = await asyncio.to_thread(self._fetch_entries, topic, agent, since, limit, user_id, tags)
+        return [self._row_to_entry(row) for row in rows]
 
     def _fetch_entries(
         self,
@@ -225,6 +218,7 @@ class SharedMemory:
         since: datetime | None,
         limit: int,
         user_id: str | None = None,
+        tags: list[str] | None = None,
     ) -> list[sqlite3.Row]:
         conditions = ["archived = 0"]
         params: list[Any] = []
@@ -242,6 +236,12 @@ class SharedMemory:
         if since:
             conditions.append("timestamp > ?")
             params.append(since.isoformat())
+        if tags:
+            conditions.append(
+                "EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(tags) THEN tags ELSE '[]' END) "
+                "AS entry_tag JOIN json_each(?) AS expected ON expected.value = entry_tag.value)"
+            )
+            params.append(json.dumps(tags))
 
         where_clause = " AND ".join(conditions)
 

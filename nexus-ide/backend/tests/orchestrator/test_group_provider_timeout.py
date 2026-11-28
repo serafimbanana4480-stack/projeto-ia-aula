@@ -16,7 +16,7 @@ async def test_stalled_provider_times_out_and_next_bot_answers(monkeypatch):
     cancelled = asyncio.Event()
 
     class Provider:
-        async def chat_stream(self, model, messages):
+        async def chat_stream(self, model, messages, **_options):
             if model == "stalled":
                 yield "Resposta parcial"
                 try:

@@ -13,7 +13,7 @@ from backend.orchestrator.routes import bot_groups as routes
 @pytest.mark.asyncio
 async def test_false_tool_claim_has_notice_in_stream_and_persisted_history(monkeypatch):
     class Provider:
-        async def chat_stream(self, model, messages):
+        async def chat_stream(self, model, messages, **_options):
             yield "Corri os testes e passaram.\n[OBJETIVO_CONCLUIDO]"
 
     async def resolve(selected, client):

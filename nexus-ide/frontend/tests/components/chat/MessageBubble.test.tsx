@@ -58,6 +58,32 @@ describe("MessageBubble — markdown rendering", () => {
     expect(ul?.querySelectorAll("li")).toHaveLength(2);
   });
 
+  it("mostra imagens de pesquisa com tamanho limitado, legenda e link para a origem", () => {
+    const { container } = render(
+      <MessageBubble
+        message={assistant("![Diagrama](https://example.com/diagrama.png)")}
+      />,
+    );
+
+    const image = container.querySelector("img");
+    expect(image?.getAttribute("src")).toBe("https://example.com/diagrama.png");
+    expect(image?.getAttribute("alt")).toBe("Diagrama");
+    expect(image?.className).toContain("max-h-[320px]");
+    expect(image?.getAttribute("loading")).toBe("lazy");
+    expect(container.querySelector("a")?.getAttribute("href")).toBe(
+      "https://example.com/diagrama.png",
+    );
+    expect(screen.getByText("Diagrama")).toBeTruthy();
+  });
+
+  it("não transforma um src javascript: em imagem executável", () => {
+    const { container } = render(
+      <MessageBubble message={assistant("![x](javascript:alert(1))")} />,
+    );
+
+    expect(container.querySelector("img")).toBeNull();
+  });
+
   it("renderiza um bloco de código com realce e cópia, e identifica a linguagem", async () => {
     const { container } = render(
       <MessageBubble

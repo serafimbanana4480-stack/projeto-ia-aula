@@ -1,9 +1,10 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { list, history, send, stream } = vi.hoisted(() => ({ list: vi.fn(), history: vi.fn(), send: vi.fn(), stream: { events: [] as unknown[], streaming: false } }));
+const { providerCatalog, providerModels } = vi.hoisted(() => ({ providerCatalog: vi.fn(), providerModels: vi.fn() }));
 vi.mock("../../../lib/bots", () => ({ listBots: list, createBot: vi.fn(), updateBot: vi.fn(), removeBot: vi.fn() }));
-vi.mock("../../../lib/api", () => ({ getSessionHistoryPage: history, getProviderCatalog: vi.fn(), getProviderModels: vi.fn() }));
+vi.mock("../../../lib/api", () => ({ getSessionHistoryPage: history, getProviderCatalog: providerCatalog, getProviderModels: providerModels }));
 vi.mock("../../../hooks/useAgentStream", () => ({
   useAgentStream: () => ({ events: stream.events, streaming: stream.streaming, busyOtherSession: false, error: null, send, cancel: vi.fn() }),
 }));
@@ -154,5 +155,33 @@ describe("BotsWorkspace", () => {
     await screen.findByRole("button", { name: /Pixel/ });
     fireEvent.change(screen.getByLabelText("Pesquisar conversas"), { target: { value: "  LOCAL  " } });
     expect(screen.getByRole("button", { name: /Pixel/ })).toBeTruthy();
+  });
+
+  it("ignora um catálogo lento quando se muda de provedor", async () => {
+    const models = (id: string) => ({ configured: true, models: [{ id }] });
+    let finishLocal!: (value: ReturnType<typeof models>) => void;
+    providerCatalog.mockResolvedValue([{ id: "local", label: "Local" }, { id: "cloud", label: "Cloud" }]);
+    providerModels.mockImplementation((id: string) => id === "local"
+      ? new Promise((resolve) => { finishLocal = resolve; })
+      : Promise.resolve(models("modelo-cloud")));
+    const showModal = Object.getOwnPropertyDescriptor(HTMLDialogElement.prototype, "showModal");
+    Object.defineProperty(HTMLDialogElement.prototype, "showModal", {
+      configurable: true,
+      value(this: HTMLDialogElement) { this.open = true; },
+    });
+    try {
+      render(<BotsWorkspace />);
+      fireEvent.click(within(screen.getByRole("region", { name: "Lista de conversas" })).getByRole("button", { name: "Criar bot" }));
+      await screen.findByRole("option", { name: "Local" });
+      const provider = screen.getByRole("combobox", { name: "Provedor" });
+      fireEvent.change(provider, { target: { value: "local" } });
+      fireEvent.change(provider, { target: { value: "cloud" } });
+      await waitFor(() => expect(document.querySelector("datalist option")?.getAttribute("value")).toBe("modelo-cloud"));
+      await act(async () => finishLocal(models("modelo-local")));
+      expect(document.querySelector("datalist option")?.getAttribute("value")).toBe("modelo-cloud");
+    } finally {
+      if (showModal) Object.defineProperty(HTMLDialogElement.prototype, "showModal", showModal);
+      else Reflect.deleteProperty(HTMLDialogElement.prototype, "showModal");
+    }
   });
 });

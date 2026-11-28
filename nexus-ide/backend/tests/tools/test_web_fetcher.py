@@ -10,7 +10,9 @@ from backend.tools.web_fetcher import (
     _cache_get,
     _cache_set,
     _extract_text_bs4,
+    _fetch_stackexchange_question,
     _init_cache_db,
+    _stackexchange_target,
     fetch_and_summarize,
 )
 
@@ -231,3 +233,86 @@ class TestFetchAndSummarize:
                 assert result["status"] == "fetched_direct"
                 assert result["title"] == "Direct"
                 assert "Direct content" in result["summary"]
+
+
+class TestStackExchangeQuestionFetch:
+    """Stack Overflow answers non-browser clients with 403; its API does not."""
+
+    def test_target_parsing(self) -> None:
+        assert _stackexchange_target(
+            "https://stackoverflow.com/questions/64534844/python-asyncio-aiohttp-timeout"
+        ) == ("stackoverflow", "64534844")
+        assert _stackexchange_target(
+            "https://math.stackexchange.com/questions/123/what-is-a-group"
+        ) == ("math", "123")
+        assert _stackexchange_target("https://askubuntu.com/questions/42/") == ("askubuntu", "42")
+        assert _stackexchange_target("https://stackoverflow.com/users/1/me") is None
+        assert _stackexchange_target("https://example.com/questions/1/x") is None
+
+    @pytest.mark.asyncio
+    async def test_question_body_comes_from_the_api(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        response = MagicMock()
+        response.json.return_value = {
+            "items": [
+                {
+                    "title": "python asyncio aiohttp timeout",
+                    "body": (
+                        "<p>Use <code>asyncio.wait_for</code> to bound the call.</p>"
+                        '<p>See <a href="https://docs.python.org/3/library/asyncio-task.html">'
+                        "the docs</a>.</p>"
+                    ),
+                    "creation_date": 1424357903,
+                }
+            ]
+        }
+        request = AsyncMock(return_value=response)
+        monkeypatch.setattr("backend.tools.web_fetcher._request_with_retry", request)
+
+        result = await _fetch_stackexchange_question(
+            "https://stackoverflow.com/questions/64534844/python-asyncio-aiohttp-timeout"
+        )
+
+        assert result is not None
+        assert result["status"] == "fetched_stackexchange"
+        assert result["title"] == "python asyncio aiohttp timeout"
+        assert "asyncio.wait_for" in result["summary"]
+        assert "https://docs.python.org/3/library/asyncio-task.html" in result["links"]
+        assert result["published_date"].startswith("2015-02-19")
+        assert request.await_args.args[2].startswith("https://api.stackexchange.com/2.3/questions/")
+        assert request.await_args.kwargs["params"]["site"] == "stackoverflow"
+
+    @pytest.mark.asyncio
+    async def test_api_failure_returns_none_so_html_fetch_runs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            "backend.tools.web_fetcher._request_with_retry",
+            AsyncMock(side_effect=Exception("api down")),
+        )
+        assert (
+            await _fetch_stackexchange_question(
+                "https://stackoverflow.com/questions/1/example"
+            )
+            is None
+        )
+
+    @pytest.mark.asyncio
+    async def test_fetch_and_summarize_prefers_the_api_for_stackoverflow(
+        self, tmp_path: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        response = MagicMock()
+        response.json.return_value = {
+            "items": [{"title": "Question", "body": "<p>Answer text</p>", "creation_date": 0}]
+        }
+        request = AsyncMock(return_value=response)
+        with (
+            patch("backend.tools.web_fetcher.CACHE_DB_PATH", tmp_path / "test_web_cache.db"),
+            patch("backend.tools.web_fetcher._request_with_retry", request),
+        ):
+            result = await fetch_and_summarize(
+                "https://stackoverflow.com/questions/64534844/python-asyncio-aiohttp-timeout"
+            )
+
+        assert result["status"] == "fetched_stackexchange"
+        assert "Answer text" in result["summary"]
+        assert request.await_count == 1

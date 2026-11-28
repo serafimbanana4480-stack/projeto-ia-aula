@@ -204,7 +204,9 @@ class AgentAction(StrEnum):
     SEARCH_WEB = "search_web"
     FETCH_URL = "fetch_url"
     READ_FILE = "read_file"
+    READ_MULTIPLE_FILES = "read_multiple_files"
     WRITE_FILE = "write_file"
+    EDIT_FILE = "edit_file"
     WRITE_FILE_ABSOLUTE = "write_file_absolute"
     READ_FILE_ABSOLUTE = "read_file_absolute"
     LIST_DIR = "list_dir"
@@ -212,6 +214,7 @@ class AgentAction(StrEnum):
     EXECUTE_CODE = "execute_code"
     CONSULT_AGENT = "consult_agent"
     SEARCH_CODEBASE = "search_codebase"
+    SEARCH_IN_FILES = "search_in_files"
     SEARCH_SYMBOLS = "search_symbols"
     INDEX_SYMBOLS = "index_symbols"
     READ_DOCS = "read_docs"
@@ -1708,8 +1711,13 @@ class AgentBase(ABC):
     # external content (web pages, files) masquerading as tool calls.
     _ALLOWED_TOOL_NAMES: frozenset[str] = frozenset({
         "search_web",
+        "web_search",
         "search_web_v2",
+        "search_and_answer",
+        "search_images",
         "fetch_url",
+        "fetch_content_v2",
+        "fetch_and_summarize",
         "read_file",
         "read_file_absolute",
         "read_multiple_files",

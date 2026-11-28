@@ -690,24 +690,37 @@ def select_skills(
     entries: list[dict[str, Any]] = []
     chunks: list[str] = []
     delivered: list[SkillDocument] = []
+    delivered_names: set[str] = set()
     remaining = max(0, min(max_chars, MAX_SKILL_CONTEXT_CHARS))
     for doc, reason, score in selected:
         manifest = doc.manifest
-        if remaining <= 0:
-            skip_reasons[doc.name] = "context_budget"
+        unavailable = [
+            name for name in manifest.dependencies if name.casefold() not in delivered_names
+        ]
+        if unavailable:
+            skip_reasons[doc.name] = "dependency_context_budget:" + ",".join(unavailable)
             continue
         if doc.path is not None:
             doc = _load_file(doc.path, doc.name, doc.path.parent.parent, full=True) or doc
-        allowance = min(manifest.max_context_chars, remaining)
+        separator = 2 if chunks else 0
+        allowance = min(manifest.max_context_chars, remaining - separator)
         header = f"### Skill: {doc.name} (v{manifest.version})\nActivation reason: {reason}\n\n"
-        body = doc.body[: max(0, allowance - len(header) - 2)]
-        block = header + body
-        if len(doc.body) > len(body):
+        body_budget = allowance - len(header)
+        if body_budget <= 0 or not doc.body.strip():
+            skip_reasons[doc.name] = "context_budget"
+            continue
+        body = doc.body
+        if len(body) > body_budget:
             note = "\n\n[skill content trimmed to fit the run context budget]"
-            block = block[: max(0, allowance - len(note))] + note
+            if body_budget <= len(note):
+                skip_reasons[doc.name] = "context_budget"
+                continue
+            body = body[:body_budget - len(note)] + note
+        block = header + body
         chunks.append(block)
-        remaining -= len(block) + 2
+        remaining -= len(block) + separator
         delivered.append(doc)
+        delivered_names.add(doc.name.casefold())
         entries.append(
             {
                 "name": doc.name,
@@ -729,12 +742,13 @@ def select_skills(
 
     if entries:
         logger.info("Activated skills for task: %s", entries)
+    context = "\n\n".join(chunks)
     return {
         "skills": entries,
-        "context": "\n\n".join(chunks),
+        "context": context,
         "rejected": rejected,
         "skipped": skip_reasons,
-        "context_chars": sum(len(chunk) for chunk in chunks),
+        "context_chars": len(context),
     }
 
 
@@ -1635,12 +1649,15 @@ def record_skill_outcome(skill_id: str, success: bool, *, name: str = "") -> dic
             store.record_use(target, result)
     except Exception:
         logger.debug("Skill outcome could not be persisted to SkillsStore", exc_info=True)
+    rate = _success_rate(skill_id)
+    if rate is None and name:
+        rate = _success_rate(name)
     return {
         "ok": True,
         "skill_id": skill_id,
         "name": name or skill_id,
         "success": result,
-        "success_rate": _success_rate(skill_id) or _success_rate(name),
+        "success_rate": rate,
     }
 
 

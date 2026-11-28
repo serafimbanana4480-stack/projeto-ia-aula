@@ -477,6 +477,11 @@ def _parse_openai_compatible(payload: dict[str, Any], provider: str) -> list[Mod
             caps.append("tools")
         if {"response_format", "structured_outputs"} & supported and "structured_output" not in caps:
             caps.append("structured_output")
+        if provider == "lmstudio" and "chat" in caps and "tools" not in caps:
+            # LM Studio's OpenAI-compatible server accepts the ``tools``
+            # payload. Without this capability the free-only policy rejects
+            # every local model for the agent loop, which always offers tools.
+            caps.append("tools")
         input_price = _price_to_per_1m(pricing.get("prompt"))
         output_price = _price_to_per_1m(pricing.get("completion"))
         if meta.get("isFree") is True and input_price is None and output_price is None:

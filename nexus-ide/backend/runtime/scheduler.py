@@ -78,7 +78,7 @@ class RuntimeTask:
     result: Any = None
 
     # Lifecycle instants (monotonic seconds). 0.0 means "not reached".
-    created_at: float = field(default_factory=time.monotonic)
+    created_at: float = field(default_factory=time.perf_counter)
     queued_at: float = 0.0
     scheduled_at: float = 0.0
     started_at: float = 0.0
@@ -88,16 +88,16 @@ class RuntimeTask:
     last_heartbeat_at: float = 0.0
 
     def heartbeat(self) -> None:
-        self.last_heartbeat_at = time.monotonic()
+        self.last_heartbeat_at = time.perf_counter()
 
     def mark_first_token(self) -> None:
         if not self.first_token_at:
-            self.first_token_at = time.monotonic()
+            self.first_token_at = time.perf_counter()
         self.heartbeat()
 
     def mark_first_tool_call(self) -> None:
         if not self.first_tool_call_at:
-            self.first_tool_call_at = time.monotonic()
+            self.first_tool_call_at = time.perf_counter()
         self.heartbeat()
 
     def lifecycle(self) -> dict[str, float]:
@@ -142,12 +142,14 @@ class RuntimeScheduler:
         max_parallel: int = 3,
         on_status: Callable[[RuntimeTask], None] | None = None,
         poll_interval: float = 0.01,
+        scope_root: str = "",
     ) -> None:
         if max_parallel < 1:
             raise ValueError("max_parallel must be >= 1")
         self.max_parallel = max_parallel
         self._on_status = on_status
         self._poll_interval = poll_interval
+        self._scope_root = scope_root
 
     # -- graph validation ---------------------------------------------
     @staticmethod
@@ -176,7 +178,7 @@ class RuntimeScheduler:
     ) -> SchedulerReport:
         graph = self.validate(tasks)
         by_id = {task.task_id: task for task in graph}
-        started = time.monotonic()
+        started = time.perf_counter()
         now = started
         for task in graph:
             task.queued_at = now
@@ -191,61 +193,58 @@ class RuntimeScheduler:
         errors: list[str] = []
         peak = 0
 
-        while True:
-            if cancel_event is not None and cancel_event.is_set():
-                await self._cancel_all(running, by_id)
-                break
-
-            self._promote_ready(by_id)
-
-            for task in self._admissible(by_id, running.values()):
-                if len(running) >= self.max_parallel:
+        try:
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    await self._cancel_all(running, by_id)
                     break
-                task.status = RuntimeTaskStatus.RUNNING
-                task.started_at = time.monotonic()
-                task.heartbeat()
-                self._notify(task)
-                handle = asyncio.create_task(self._guarded(task))
-                running[handle] = task
-            peak = max(peak, len(running))
 
-            if not running:
-                if self._all_settled(by_id):
+                self._promote_ready(by_id)
+
+                slots = self.max_parallel - len(running)
+                if slots:
+                    for task in self._admissible(by_id, running.values())[:slots]:
+                        task.status = RuntimeTaskStatus.RUNNING
+                        task.started_at = time.perf_counter()
+                        task.heartbeat()
+                        self._notify(task)
+                        handle = asyncio.create_task(self._guarded(task))
+                        running[handle] = task
+                peak = max(peak, len(running))
+
+                if not running:
+                    if not self._all_settled(by_id):
+                        for task in by_id.values():
+                            if task.status in TERMINAL_STATUSES:
+                                continue
+                            task.status = RuntimeTaskStatus.BLOCKED
+                            task.error = task.error or "unsatisfiable dependency"
+                            task.completed_at = time.perf_counter()
+                            self._notify(task)
+                            errors.append(f"{task.name}: {task.error}")
                     break
-                # Nothing runnable and nothing running: the remainder can
-                # never make progress. Mark it BLOCKED instead of spinning.
-                stuck = [
-                    task
-                    for task in by_id.values()
-                    if task.status
-                    in (RuntimeTaskStatus.PENDING, RuntimeTaskStatus.WAITING)
-                ]
-                for task in stuck:
-                    task.status = RuntimeTaskStatus.BLOCKED
-                    task.error = task.error or "unsatisfiable dependency"
-                    task.completed_at = time.monotonic()
+
+                done, _ = await asyncio.wait(
+                    running.keys(),
+                    timeout=self._poll_interval if cancel_event is not None else None,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for handle in done:
+                    task = running.pop(handle)
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await handle
+                    if task.status is RuntimeTaskStatus.FAILED and task.error:
+                        errors.append(f"{task.name}: {task.error}")
                     self._notify(task)
-                    errors.append(f"{task.name}: {task.error}")
-                break
-
-            done, _ = await asyncio.wait(
-                running.keys(),
-                timeout=self._poll_interval,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for handle in done:
-                task = running.pop(handle)
-                with contextlib.suppress(asyncio.CancelledError):
-                    await handle
-                if task.status is RuntimeTaskStatus.FAILED and task.error:
-                    errors.append(f"{task.name}: {task.error}")
-                self._notify(task)
-                self._propagate_failure(task, by_id, errors)
+                    self._propagate_failure(task, by_id, errors)
+        except asyncio.CancelledError:
+            await self._cancel_all(running, by_id)
+            raise
 
         return SchedulerReport(
             tasks=list(by_id.values()),
             peak_parallelism=peak,
-            duration=time.monotonic() - started,
+            duration=time.perf_counter() - started,
             errors=errors,
         )
 
@@ -260,7 +259,7 @@ class RuntimeScheduler:
                 continue  # handled by _propagate_failure
             if all(dep.status is RuntimeTaskStatus.COMPLETED for dep in deps):
                 task.status = RuntimeTaskStatus.READY
-                task.scheduled_at = time.monotonic()
+                task.scheduled_at = time.perf_counter()
                 self._notify(task)
             elif task.status is RuntimeTaskStatus.PENDING:
                 task.status = RuntimeTaskStatus.WAITING
@@ -295,9 +294,9 @@ class RuntimeScheduler:
         for task in candidates:
             # Serialise writer/writer and writer/reader overlaps.
             if (
-                scopes_overlap(task.write_scope, owned_write)
-                or scopes_overlap(task.read_scope, owned_write)
-                or scopes_overlap(task.write_scope, owned_read)
+                scopes_overlap(task.write_scope, owned_write, self._scope_root)
+                or scopes_overlap(task.read_scope, owned_write, self._scope_root)
+                or scopes_overlap(task.write_scope, owned_read, self._scope_root)
             ):
                 continue
             admitted.append(task)
@@ -312,12 +311,13 @@ class RuntimeScheduler:
                 task.result = await asyncio.wait_for(
                     self._with_watchdog(task), timeout=task.timeout_seconds
                 )
+                task.error = ""
                 task.status = RuntimeTaskStatus.COMPLETED
-                task.completed_at = time.monotonic()
+                task.completed_at = time.perf_counter()
                 return
             except asyncio.CancelledError:
                 task.status = RuntimeTaskStatus.CANCELLED
-                task.completed_at = time.monotonic()
+                task.completed_at = time.perf_counter()
                 raise
             except TimeoutError:
                 task.error = f"timed out after {task.timeout_seconds:.0f}s"
@@ -328,25 +328,22 @@ class RuntimeScheduler:
 
             if task.retries < task.max_retries:
                 task.retries += 1
-                task.status = RuntimeTaskStatus.READY
-                self._notify(task)
+                task.heartbeat()
                 continue
             task.status = RuntimeTaskStatus.FAILED
-            task.completed_at = time.monotonic()
+            task.completed_at = time.perf_counter()
             return
 
     async def _with_watchdog(self, task: RuntimeTask) -> Any:
         """Fail a task that stops reporting progress, instead of hanging."""
-        work = asyncio.create_task(task.run(task))
+        work = asyncio.ensure_future(task.run(task))
         try:
             if task.heartbeat_timeout_seconds <= 0:
                 return await work
             while True:
-                done, _ = await asyncio.wait({work}, timeout=self._poll_interval)
-                if done:
-                    return await work
-                silent_for = time.monotonic() - (task.last_heartbeat_at or task.started_at)
-                if silent_for > task.heartbeat_timeout_seconds:
+                silent_for = time.perf_counter() - (task.last_heartbeat_at or task.started_at)
+                remaining = task.heartbeat_timeout_seconds - silent_for
+                if remaining <= 0:
                     work.cancel()
                     with contextlib.suppress(asyncio.CancelledError, Exception):
                         await work
@@ -354,6 +351,9 @@ class RuntimeScheduler:
                         f"no progress for {silent_for:.0f}s "
                         f"(heartbeat timeout {task.heartbeat_timeout_seconds:.0f}s)"
                     )
+                done, _ = await asyncio.wait({work}, timeout=remaining)
+                if done:
+                    return await work
         except asyncio.CancelledError:
             # Cancelling the scheduler's handle must cancel the work it is
             # waiting for. Without this the subagent kept running after the
@@ -376,7 +376,7 @@ class RuntimeScheduler:
             if task.task_id in other.depends_on and other.status not in TERMINAL_STATUSES:
                 other.status = RuntimeTaskStatus.BLOCKED
                 other.error = f"dependency {task.name!r} did not complete"
-                other.completed_at = time.monotonic()
+                other.completed_at = time.perf_counter()
                 errors.append(f"{other.name}: {other.error}")
                 self._notify(other)
                 self._propagate_failure(other, by_id, errors)
@@ -391,18 +391,19 @@ class RuntimeScheduler:
         by_id: dict[str, RuntimeTask],
     ) -> None:
         for handle, task in running.items():
-            handle.cancel()
-            task.status = RuntimeTaskStatus.CANCELLED
-            task.completed_at = time.monotonic()
-            self._notify(task)
-        for handle in running:
+            if task.status not in TERMINAL_STATUSES:
+                handle.cancel()
+                task.status = RuntimeTaskStatus.CANCELLED
+                task.completed_at = time.perf_counter()
+        for handle, task in running.items():
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await handle
+            self._notify(task)
         running.clear()
         for task in by_id.values():
             if task.status not in TERMINAL_STATUSES:
                 task.status = RuntimeTaskStatus.CANCELLED
-                task.completed_at = time.monotonic()
+                task.completed_at = time.perf_counter()
                 self._notify(task)
 
     def _notify(self, task: RuntimeTask) -> None:

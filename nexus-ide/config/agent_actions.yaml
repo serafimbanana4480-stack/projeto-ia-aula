@@ -89,6 +89,18 @@ actions:
     examples:
       - path: "backend/main.py"
       - path: "config/models.yaml"
+  READ_MULTIPLE_FILES:
+    tool: read_multiple_files
+    example_args: '{"paths": ["backend/main.py", "backend/config/settings.py"]}'
+    when_to_use: "Read several related files in ONE call instead of one read_file per file — cheaper and keeps them adjacent in context."
+    risk_level: "low"
+    tags: ["file", "read", "fs", "batch"]
+  SEARCH_IN_FILES:
+    tool: search_in_files
+    example_args: '{"query": "def chat_stream"}'
+    when_to_use: "Literal text search across the project (grep-style). Use it to find where a symbol, string or error message appears before reading whole files. For code by meaning use search_codebase; for an exact symbol name use search_symbols."
+    risk_level: "low"
+    tags: ["file", "search", "fs"]
   WRITE_FILE:
     tool: write_file
     example_args: '{"path": "src/utils.py", "content": "def hello():\n    pass"}'
@@ -99,6 +111,13 @@ actions:
     examples:
       - path: "src/utils.py"
         content: "def hello():\n    return 'world'"
+  EDIT_FILE:
+    tool: edit_file
+    example_args: '{"path": "src/utils.py", "old_text": "return \"world\"", "new_text": "return \"hello\""}'
+    when_to_use: "Preferred way to change part of an existing file: send only the exact snippet to replace (old_text) and its replacement, not the whole file. Make old_text unique; read the file first."
+    risk_level: "medium"
+    requires_confirmation: false
+    tags: ["file", "write", "edit", "fs"]
   WRITE_FILE_ABSOLUTE:
     tool: write_file_absolute
     example_args: '{"path": "/etc/hosts", "content": ""}'
@@ -190,7 +209,7 @@ actions:
   DEEP_RESEARCH:
     tool: deep_research
     example_args: '{"query": "state of vector databases 2026", "max_results": 5}'
-    when_to_use: "Multi-source research synthesis for a broad open question; reads several sources and returns a cited answer. Slow and expensive — not for a single lookup, use web_search."
+    when_to_use: "Multi-source research for a question that needs a cited answer (numbered sources, dates and excerpts) plus a list of page images to embed as ![alt](url) when the user wants visuals. Returns a compact `brief` — read it first. Slower than web_search; use web_search for a plain list of links."
     risk_level: "low"
     tags: ["web", "research", "deep"]
   API_REQUEST:

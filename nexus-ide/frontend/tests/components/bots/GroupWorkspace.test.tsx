@@ -58,4 +58,48 @@ describe("GroupWorkspace", () => {
     expect(screen.getAllByText("Resposta recente")).toHaveLength(1);
     expect(request.mock.calls[2][0]).toContain("before=m2");
   });
+
+  it("mantém um rascunho por grupo e pesquisa pelos nomes dos participantes", async () => {
+    const other = { ...group, id: "g2", name: "Revisão", bot_ids: ["b1"] };
+    request.mockImplementation((path: string) => Promise.resolve(path === "/api/bot-groups"
+      ? json({ groups: [group, other] }) : json({ messages: [] })));
+    render(<GroupWorkspace bots={bots} onBack={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Equipa/ }));
+    const input = screen.getByRole("textbox", { name: "Mensagem para o grupo" });
+    await waitFor(() => expect((input as HTMLTextAreaElement).disabled).toBe(false));
+    fireEvent.change(input, { target: { value: "rascunho da equipa" } });
+    fireEvent.click(screen.getByRole("button", { name: /Revisão/ }));
+    expect((input as HTMLTextAreaElement).value).toBe("");
+    fireEvent.click(screen.getByRole("button", { name: /Equipa/ }));
+    expect((input as HTMLTextAreaElement).value).toBe("rascunho da equipa");
+    fireEvent.change(screen.getByRole("searchbox", { name: "Pesquisar grupos" }), { target: { value: "Pixel" } });
+    expect(screen.queryByRole("button", { name: /Revisão/ })).toBeNull();
+    await waitFor(() => expect((input as HTMLTextAreaElement).disabled).toBe(false));
+  });
+
+  it("não repõe na caixa de texto um pedido já confirmado quando o stream é interrompido", async () => {
+    const message = { id: "m1", role: "user", content: "Pedido guardado", bot_id: null, bot_name: null, created_at: "now" };
+    const payload = JSON.stringify({ type: "user_message", message });
+    const stream = new ReadableStream({ start(controller) {
+      const encoder = new TextEncoder();
+      controller.enqueue(encoder.encode("data: " + payload + "\r"));
+      controller.enqueue(encoder.encode("\n\r"));
+      controller.enqueue(encoder.encode("\n"));
+      controller.close();
+    } });
+    request.mockResolvedValueOnce(json({ groups: [group] }))
+      .mockResolvedValueOnce(json({ messages: [] }))
+      .mockResolvedValueOnce({ ok: true, body: stream })
+      .mockResolvedValueOnce(json({ messages: [message] }))
+      .mockResolvedValueOnce(json({ groups: [group] }));
+    render(<GroupWorkspace bots={bots} onBack={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Equipa/ }));
+    const input = screen.getByRole("textbox", { name: "Mensagem para o grupo" });
+    await waitFor(() => expect((input as HTMLTextAreaElement).disabled).toBe(false));
+    fireEvent.change(input, { target: { value: message.content } });
+    fireEvent.click(screen.getByRole("button", { name: "Enviar ao grupo" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("A ligação terminou antes da confirmação");
+    expect(screen.getAllByText(message.content)).toHaveLength(1);
+    expect((input as HTMLTextAreaElement).value).toBe("");
+  });
 });

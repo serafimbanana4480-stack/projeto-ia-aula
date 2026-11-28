@@ -18,6 +18,11 @@ class OllamaProvider(OllamaClient):
     using :func:`asyncio.gather`.
     """
 
+    _free_validated: bool
+    _free_candidates: list[Any]
+    fallback_model: str | None
+    direct_answer: bool
+
     @property
     def last_usage(self) -> dict[str, int]:
         """Return usage from the most recent Ollama call."""
@@ -30,6 +35,7 @@ class OllamaProvider(OllamaClient):
             raise RuntimeError("local model catalog is not validated")
         entries = getattr(self, "_free_candidates", None) or []
         for entry in entries:
+            entry_id: Any
             if isinstance(entry, str):
                 entry_id = entry
                 installed = healthy = True

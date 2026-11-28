@@ -181,6 +181,7 @@ async def test_retry_then_success_is_recorded() -> None:
 
     assert task.status is RuntimeTaskStatus.COMPLETED
     assert task.retries == 1
+    assert task.error == ""
     assert attempts["n"] == 2
 
 
@@ -207,6 +208,27 @@ async def test_cancellation_stops_running_and_queued_tasks() -> None:
 
     assert all(task.status is RuntimeTaskStatus.CANCELLED for task in report.tasks)
     assert len(started) <= 2, "queued tasks were started after cancellation"
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_scheduler_coroutine_waits_for_child_cleanup() -> None:
+    started, stopped = asyncio.Event(), asyncio.Event()
+
+    async def slow(_: RuntimeTask) -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            stopped.set()
+
+    task = RuntimeTask(name="worker", run=slow)
+    handle = asyncio.create_task(RuntimeScheduler().run([task]))
+    await asyncio.wait_for(started.wait(), 2)
+    handle.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await handle
+    assert stopped.is_set()
+    assert task.status is RuntimeTaskStatus.CANCELLED
 
 
 def test_cycles_are_rejected_before_anything_runs() -> None:

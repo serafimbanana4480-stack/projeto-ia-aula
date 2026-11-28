@@ -12,7 +12,7 @@ import os
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from backend.config.settings import get_settings
 from backend.llm.airllm_provider import AirLLMProvider
@@ -720,7 +720,10 @@ class ResilientLLMProvider:
         messages: list[dict[str, str]],
         **kwargs: Any,
     ) -> str:
-        return await self._try_providers("chat_complete", model, messages, **kwargs)
+        return cast(
+            str,
+            await self._try_providers("chat_complete", model, messages, **kwargs),
+        )
 
     async def batch_complete(
         self,
@@ -777,7 +780,7 @@ class ResilientLLMProvider:
                 self._cost_record(
                     provider, provider_model, messages_list[0] if messages_list else [], joined, kwargs
                 )
-                return result
+                return cast(list[str], result)
             except BudgetExceededError:
                 raise
             except Exception as exc:
@@ -797,7 +800,10 @@ class ResilientLLMProvider:
         model: str,
         **kwargs: Any,
     ) -> list[list[float]]:
-        return await self._try_providers("embed", texts, model, **kwargs)
+        return cast(
+            list[list[float]],
+            await self._try_providers("embed", texts, model, **kwargs),
+        )
 
     async def health_check(self) -> bool:
         """Return true when any eligible real provider is reachable.
@@ -1314,6 +1320,19 @@ def create_multi_llm_manager(*, overrides: dict[str, Any] | None = None) -> Mult
             fast_model=str(_setting_value(settings, values, "lmstudio_fast_model", "") or ""),
             coder_model=str(_setting_value(settings, values, "lmstudio_coder_model", "") or ""),
         )
+        # A local LM Studio server is zero-cost, but the free-only policy only
+        # authorises providers whose catalog it can see.  Attach the models the
+        # catalog already validated (same contract as the Ollama branch), or
+        # automatic routing rejects the only configured provider.
+        lmstudio_provider._free_validated = True
+        if lmstudio_validated:
+            lmstudio_provider._catalog = lmstudio_validated
+            lmstudio_provider._free_candidates = [model.id for model in lmstudio_validated]
+            lmstudio_provider.quota_available = True
+            lmstudio_provider.validated_at = max(
+                (model.validated_at or 0.0) for model in lmstudio_validated
+            )
+            lmstudio_provider.eligibility_reason = "verified local LM Studio models"
         manager.register_provider(
             "lmstudio", lmstudio_provider, priority=priority_for("lmstudio", 4)
         )
@@ -1520,6 +1539,9 @@ def create_llm_client(**overrides: Any) -> Any:
             category="eligibility",
             provider=provider,
         )
+    # Each branch builds a different provider implementation behind the same
+    # ResilientLLMProvider interface.
+    primary: Any
     if provider in ("local", "ollama"):
         # Selecting Ollama in the Settings UI is an explicit local-provider
         # opt-in.  Requiring a second hidden environment flag made the UI
@@ -1556,11 +1578,12 @@ def create_llm_client(**overrides: Any) -> Any:
             except Exception:  # noqa: BLE001 - live chat can still report the provider error
                 logger.debug("Could not load cached Ollama model validation", exc_info=True)
         primary._free_validated = _local_models_ready(local_models)
-        primary._free_candidates = (
+        local_candidates = (
             local_models.get("models", local_models.get("installed", []))
             if isinstance(local_models, dict)
             else local_models or []
         )
+        primary._free_candidates = local_candidates if isinstance(local_candidates, list) else []
         fallbacks = _build_fallback_chain(
             settings,
             effective_overrides,

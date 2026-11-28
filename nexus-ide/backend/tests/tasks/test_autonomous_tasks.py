@@ -23,6 +23,7 @@ from backend.persistence.db import (
 from backend.tasks.autonomous_tasks import (
     AutonomousTaskManager,
     Task,
+    TaskPriority,
     TaskStatus,
     TaskType,
 )
@@ -309,8 +310,8 @@ async def test_retry_backoff_sequence_releases_slot(monkeypatch) -> None:
         assert scheduler.stats["running_tasks"] == 0
         assert scheduler._running_asyncio == {}
         # Flush the detached backoff sleep and the re-enqueue it performs.
-        await asyncio.gather(*scheduler._retry_tasks)
-        scheduler._retry_tasks.clear()
+        await asyncio.gather(*scheduler._retry_tasks.values())
+        assert not scheduler._retry_tasks
 
     assert recorded == [120, 240, 300]
     assert task.retry_count == 3
@@ -347,6 +348,68 @@ async def test_cancel_running_task_does_not_resurrect_completed() -> None:
     assert task.status == TaskStatus.CANCELLED
     assert task.result is None
     assert task.task_id not in scheduler.running_tasks
+
+
+async def test_admission_reserves_slots_and_skips_blocked_dependencies() -> None:
+    scheduler = _make_manager().scheduler
+    scheduler._running = True
+    scheduler._max_concurrent = 1
+    entered, release = asyncio.Event(), asyncio.Event()
+    starts: list[str] = []
+
+    async def worker(label: str) -> None:
+        starts.append(label)
+        entered.set()
+        await release.wait()
+
+    for label, priority, dependencies in [
+        ("low", TaskPriority.LOW, []),
+        ("blocked", TaskPriority.URGENT, ["awaiting-parent"]),
+        ("high", TaskPriority.HIGH, []),
+    ]:
+        await scheduler.schedule_task(Task(
+            name=label, priority=priority, dependencies=dependencies,
+            handler=worker, parameters={"label": label},
+        ))
+
+    try:
+        await scheduler._process_pending_tasks()
+        assert len(scheduler._running_asyncio) == 1
+        await asyncio.wait_for(entered.wait(), 2)
+        assert starts == ["high"]
+        await scheduler._process_pending_tasks()
+        assert starts == ["high"]
+        assert {task.name for task in scheduler.task_queue} == {"low", "blocked"}
+    finally:
+        release.set()
+        await scheduler.stop()
+
+
+async def test_cancel_during_retry_and_resolve_completed_dependency_from_sqlite() -> None:
+    from backend.persistence.db import get_db
+
+    scheduler = _make_manager().scheduler
+
+    async def fail() -> None:
+        raise RuntimeError("first attempt")
+
+    task = Task(name="retry", handler=fail, max_retries=2)
+    task_id = await scheduler.schedule_task(task)
+    await scheduler._execute_task(task)
+    retry = scheduler._retry_tasks[task_id]
+    assert await scheduler.cancel_task(task_id)
+    await asyncio.gather(retry, return_exceptions=True)
+    assert task.status is TaskStatus.CANCELLED
+    assert not scheduler._retry_tasks and task not in scheduler.task_queue
+    with get_db() as conn:
+        persisted = conn.execute("SELECT status FROM scheduled_tasks WHERE id = ?", (task_id,)).fetchone()
+    assert persisted["status"] == "cancelled"
+
+    prior = Task(name="prior", status=TaskStatus.COMPLETED, handler_name="fixture")
+    save_scheduled_task(prior.to_dict())
+    assert prior.task_id not in scheduler.tasks
+    dependent = Task(name="dependent", dependencies=[prior.task_id])
+    assert await scheduler._check_dependencies(dependent)
 
 
 # ---------------------------------------------------------------------------

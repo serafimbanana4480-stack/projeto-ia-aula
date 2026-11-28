@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import time
+from collections.abc import AsyncIterator
 from typing import Any
 
 from backend.llm.free_policy import FreeModelRequirement, ProviderUnavailableError
@@ -49,6 +50,11 @@ class OpenRouterProvider:
 
     DEFAULT_BASE_URL = "https://openrouter.ai/api"
     provider_name = "openrouter"
+    fallback_model: str | None
+    _local_embed_host: str
+    quota_available: bool | None
+    validated_at: float | None
+    eligibility_reason: str
 
     MODEL_ALIASES: dict[str, str] = {
         "auto": "auto",
@@ -301,6 +307,10 @@ class OpenRouterProvider:
                 )
             )
             latency = field("latency_ms")
+            if isinstance(validated_at, bool) or not isinstance(
+                validated_at, (int, float, str)
+            ):
+                return False, None
             try:
                 validated_value = float(validated_at)
             except (TypeError, ValueError):
@@ -326,6 +336,10 @@ class OpenRouterProvider:
                 continue
             quota = getattr(entry, "quota_available", None) if not isinstance(entry, dict) else entry.get("quota_available")
             validated_at = getattr(entry, "validated_at", None) if not isinstance(entry, dict) else entry.get("validated_at")
+            if isinstance(validated_at, bool) or not isinstance(
+                validated_at, (int, float, str)
+            ):
+                continue
             try:
                 validated_value = float(validated_at)
             except (TypeError, ValueError):
@@ -414,7 +428,9 @@ class OpenRouterProvider:
         kwargs["options"] = normalized
         return kwargs
 
-    async def chat_stream(self, model, messages, **kwargs):
+    async def chat_stream(
+        self, model: str, messages: list[dict[str, str]], **kwargs: Any
+    ) -> AsyncIterator[str]:
         self._client.last_finish_reason = ""
         resolved = self.validate_model(model)
         kwargs = self._prepare_request_kwargs(kwargs)
@@ -440,7 +456,9 @@ class OpenRouterProvider:
             self._observe_provider_error(exc)
             raise
 
-    async def chat_complete(self, model, messages, **kwargs):
+    async def chat_complete(
+        self, model: str, messages: list[dict[str, str]], **kwargs: Any
+    ) -> str:
         self._client.last_finish_reason = ""
         resolved = self.validate_model(model)
         kwargs = self._prepare_request_kwargs(kwargs)
@@ -456,7 +474,9 @@ class OpenRouterProvider:
             self._observe_provider_error(exc)
             raise
 
-    async def embed(self, texts, model, **kwargs):
+    async def embed(
+        self, texts: list[str], model: str, **kwargs: Any
+    ) -> list[list[float]]:
         """Use an explicitly configured, bounded local embedding service."""
         from backend.tools.ollama_client import OllamaClient
 

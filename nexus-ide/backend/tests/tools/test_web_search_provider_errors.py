@@ -21,8 +21,12 @@ def test_all_provider_failures_raise_instead_of_becoming_cached_empty_results(
     ) -> list[web_search.SearchHit]:
         raise web_search.SearchProviderError("duckduckgo")
 
+    async def bing_fails(*_args: object, **_kwargs: object) -> list[web_search.SearchHit]:
+        raise web_search.SearchProviderError("bing")
+
     monkeypatch.setattr(web_search, "_search_brave", brave_fails)
     monkeypatch.setattr(web_search, "_search_duckduckgo", duckduckgo_fails)
+    monkeypatch.setattr(web_search, "_search_bing", bing_fails)
 
     with pytest.raises(web_search.SearchProvidersUnavailable):
         asyncio.run(web_search.search_web(query, max_results=3))
@@ -41,6 +45,11 @@ def test_all_provider_failures_raise_instead_of_becoming_cached_empty_results(
         ]
 
     monkeypatch.setattr(web_search, "_search_duckduckgo", duckduckgo_recovers)
+
+    async def bing_empty(*_args: object, **_kwargs: object) -> list[web_search.SearchHit]:
+        return []
+
+    monkeypatch.setattr(web_search, "_search_bing", bing_empty)
     result = asyncio.run(web_search.search_web(query, max_results=3))
 
     assert result["count"] == 1
@@ -58,6 +67,13 @@ def test_empty_results_are_kept_when_a_provider_responds_successfully(
 
     monkeypatch.setattr(web_search, "_search_brave", no_brave_key)
     monkeypatch.setattr(web_search, "_search_duckduckgo", no_matches)
+    monkeypatch.setattr(web_search, "_search_bing", no_matches)
+
+    async def no_fallback(*_args: object, **_kwargs: object) -> list[web_search.SearchHit]:
+        return []
+
+    monkeypatch.setattr(web_search, "_search_bing_news", no_fallback)
+    monkeypatch.setattr(web_search, "_search_stackexchange", no_fallback)
 
     result = asyncio.run(web_search.search_web("genuinely-empty-result-2026-09-28", max_results=3))
 

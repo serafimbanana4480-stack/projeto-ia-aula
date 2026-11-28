@@ -150,6 +150,7 @@ _EXTERNAL_TEXT_FIELDS: frozenset[str] = frozenset(
         "stderr",
         "summary",
         "answer",
+        "brief",
         "body",
         "snippet",
         "snippets",
@@ -159,6 +160,7 @@ _EXTERNAL_TEXT_FIELDS: frozenset[str] = frozenset(
         "results",
         "hits",
         "links",
+        "images",
         "repositories",
         "rows",
         "columns",
@@ -173,6 +175,8 @@ _EXTERNAL_TEXT_FIELDS: frozenset[str] = frozenset(
         # body of an api_request, response headers, and the diagnostic text a
         # tool writes about itself. All of them are attacker-influenceable.
         "title",
+        "published_date",
+        "age_hint",
         "message",
         "subjects",
         "senders",

@@ -812,6 +812,33 @@ function AssistantMarkdown({ text, theme }: { text: string; theme: Parameters<ty
             </a>
           );
         },
+        img({ src, alt, title }: any) {
+          const url = typeof src === "string" ? src : "";
+          // react-markdown already blocks non-http(s) URLs; keep the explicit
+          // guard because research results are third-party content.
+          if (!/^https?:\/\//i.test(url)) return null;
+          return (
+            <a
+              href={url}
+              target="_blank"
+              rel="noreferrer"
+              title={title || url}
+              className="my-3 block w-fit max-w-full overflow-hidden rounded-lg border border-nexus-border/50 bg-nexus-bg/40 transition-colors hover:border-nexus-accent/50"
+            >
+              {/* eslint-disable-next-line @next/next/no-img-element -- markdown images have no intrinsic dimensions for next/image */}
+              <img
+                src={url}
+                alt={alt || ""}
+                loading="lazy"
+                referrerPolicy="no-referrer"
+                className="block max-h-[320px] w-auto max-w-full object-contain"
+              />
+              {alt ? (
+                <span className="block px-2.5 py-1.5 text-[11px] leading-snug text-nexus-muted">{alt}</span>
+              ) : null}
+            </a>
+          );
+        },
         input({ type, checked, ...props }: any) {
           if (type === "checkbox") {
             return (

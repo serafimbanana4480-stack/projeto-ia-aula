@@ -1,8 +1,8 @@
 ﻿"use client";
 
 import { lazy, Suspense, useState } from "react";
-import Image from "next/image";
 import { Check, Copy } from "lucide-react";
+import type { CSSProperties } from "react";
 import ReactMarkdown from "react-markdown";
 import type { ChatMessage } from "../../lib/types";
 
@@ -38,25 +38,17 @@ export function BotAvatar({
   compact?: boolean;
 }) {
   const hue = hueFromId(id);
-  const size = large ? 112 : compact ? 32 : 44;
+  const initials = name.trim().split(/\s+/).slice(0, 2).map((word) => Array.from(word)[0]).join("").toLocaleUpperCase() || "B";
   return (
     <span
       aria-hidden="true"
-      className={`nx-bots-avatar relative flex shrink-0 items-center justify-center overflow-hidden border bg-[radial-gradient(circle_at_50%_35%,rgba(255,255,255,.16),rgba(255,255,255,.03)_62%,rgba(0,0,0,.28))] shadow-[inset_0_1px_0_rgba(255,255,255,.14),0_8px_24px_rgba(0,0,0,.28)] ${
-        thinking ? "nx-bots-avatar-live border-cyan-300/60" : "border-white/10"
-      } ${large ? "h-28 w-28 rounded-[1.75rem] p-1" : compact ? "h-8 w-8 rounded-lg p-0.5" : "h-11 w-11 rounded-xl p-0.5"}`}
-      style={{ borderColor: thinking ? undefined : `hsla(${hue}, 78%, 68%, .34)` }}
+      className={`nx-bot-identity relative inline-grid shrink-0 place-items-center border font-semibold ${
+        large ? "size-20 rounded-[1.5rem] text-3xl" : compact ? "size-8 rounded-lg text-[11px]" : "size-11 rounded-xl text-sm"
+      }`}
+      style={{ "--bot-hue": hue } as CSSProperties}
     >
-      {thinking && <span className="absolute inset-0 animate-pulse rounded-[inherit] bg-cyan-300/10" />}
-      <Image
-        src="/images/bot-pet-skull-v2.png"
-        alt=""
-        width={size}
-        height={size}
-        draggable={false}
-        className="relative h-full w-full object-contain transition-transform duration-300 hover:rotate-[-7deg] hover:scale-110"
-        style={{ filter: `hue-rotate(${hue}deg) saturate(1.18) drop-shadow(0 4px 8px hsla(${hue}, 85%, 58%, .32))` }}
-      />
+      {initials}
+      {thinking && <span className="absolute -bottom-0.5 -right-0.5 size-2.5 rounded-full bg-emerald-400 ring-2 ring-[var(--nx-bg)] motion-safe:animate-pulse" />}
     </span>
   );
 }

@@ -2,8 +2,8 @@
 
 The runtime may use a cloud model only after a live catalog has proved both
 input and output prices are exactly zero. Missing/stale prices are unknown,
-not free. Local Ollama models are eligible only when the caller supplies an
-installed, enabled local catalog entry.
+not free. Local servers (Ollama, LM Studio) are zero-cost by construction:
+their models are eligible when the caller has validated the installed catalog.
 """
 from __future__ import annotations
 
@@ -12,6 +12,10 @@ import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
+
+# Providers served by a local, uncapped inference server. Their catalogs carry
+# no per-token prices, so "free" is decided by the validated local listing.
+_LOCAL_FREE_PROVIDERS = frozenset({"ollama", "local", "lmstudio"})
 
 
 def is_simulation_provider(provider: Any) -> bool:
@@ -123,7 +127,11 @@ def _eligibility(candidate: Any) -> ModelEligibility:
     input_price = _value(candidate, "input_price_per_1m", None)
     output_price = _value(candidate, "output_price_per_1m", None)
     verified_prices = input_price == 0 and output_price == 0
-    local_verified = provider == "ollama" and bool(_value(candidate, "installed", True))
+    # Local inference servers never bill per token, so a validated model from
+    # one is zero-cost even though the catalog carries no price fields.
+    local_verified = provider in _LOCAL_FREE_PROVIDERS and bool(
+        _value(candidate, "installed", True)
+    )
     free = bool(_value(candidate, "free", False)) and (verified_prices or local_verified)
     if local_verified:
         free = True
@@ -235,6 +243,7 @@ class FreeModelPolicy:
                 simulation=simulation,
                 eligibility=item,
             )
+        return None
 
     @staticmethod
     def _local_eligibilities(local_models: Any) -> list[ModelEligibility]:

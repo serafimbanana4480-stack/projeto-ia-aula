@@ -46,7 +46,7 @@ async def test_free_kilo_group_uses_anonymous_adapter(monkeypatch: pytest.Monkey
     calls = []
 
     class FreeProvider:
-        async def chat_stream(self, model, messages):
+        async def chat_stream(self, model, messages, **_options):
             calls.append(model)
             yield "Feito\n[OBJETIVO_CONCLUIDO]"
 
@@ -79,7 +79,7 @@ async def test_group_discussion_uses_profiles_history_and_owner(monkeypatch: pyt
         def __init__(self, provider: str) -> None:
             self.provider = provider
 
-        async def chat_stream(self, model: str, messages: list[dict[str, str]]):
+        async def chat_stream(self, model: str, messages: list[dict[str, str]], **_options: Any):
             calls.append((self.provider, model, messages))
             if model == "model-b":
                 raise RuntimeError("connection failed")
@@ -143,7 +143,7 @@ async def test_cancellation_interrupts_provider_and_releases_group(monkeypatch: 
     cancelled = asyncio.Event()
 
     class Provider:
-        async def chat_stream(self, _model: str, _messages: list[dict[str, str]]):
+        async def chat_stream(self, _model: str, _messages: list[dict[str, str]], **_options: Any):
             entered.set()
             try:
                 await asyncio.Event().wait()
@@ -190,14 +190,14 @@ async def test_cancellation_interrupts_provider_and_releases_group(monkeypatch: 
         assert "interrompida" in history[-1]["content"]
 
 @pytest.mark.asyncio
-async def test_group_requires_unanimity_in_same_round_without_turn_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_group_requires_unanimity_in_same_round(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = []
 
     class Provider:
-        async def chat_stream(self, model, messages):
+        async def chat_stream(self, model, messages, **_options):
             calls.append(model)
             approved = len(calls) in (1, 4) or len(calls) >= 15
-            yield "Análise " + str(len(calls)) + ("\n[OBJETIVO_CONCLUIDO]" if approved else "")
+            yield "Análise " + str(len(calls)) + ("\n[OBJETIVO_CONCLUIDO]" + " " * 80 if approved else "")
 
     async def resolve(_selected, _client):
         return Provider(), None
@@ -218,3 +218,35 @@ async def test_group_requires_unanimity_in_same_round_without_turn_limit(monkeyp
         history = (await client.get(f"/api/bot-groups/{group_id}/messages")).json()["messages"]
         assert len(history) == 17
         assert all("[OBJETIVO_CONCLUIDO]" not in item["content"] for item in history)
+
+
+@pytest.mark.asyncio
+async def test_group_finishes_without_consensus_at_the_round_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    class Provider:
+        async def chat_stream(self, model: str, messages: list[dict[str, str]], **_options: Any):
+            calls.append(model)
+            assert messages[1]["content"].count("Pedido único") == 1
+            yield "A avaliação continua."
+
+    async def resolve(_selected: Any, _client: Any):
+        return Provider(), None
+
+    monkeypatch.setattr(routes, "_request_provider_client", resolve)
+    monkeypatch.setattr(routes, "_MAX_ROUNDS", 2)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test", headers=_auth("round-limit"),
+    ) as client:
+        ids = []
+        for name in ("Primeiro", "Segundo"):
+            bot = await client.post("/api/bots", json={"name": name, "provider": "lmstudio", "model": name})
+            ids.append(bot.json()["id"])
+        group = await client.post("/api/bot-groups", json={"name": "Divergência", "bot_ids": ids})
+        endpoint = f"/api/bot-groups/{group.json()['id']}/messages"
+        response = await client.post(endpoint, json={"message": "Pedido único"})
+        frames = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
+        assert frames[-1] == {"type": "done", "status": "limit"}
+        assert calls == ["Primeiro", "Segundo", "Primeiro", "Segundo"]
+        history = (await client.get(endpoint)).json()["messages"]
+        assert len(history) == 5

@@ -6,6 +6,11 @@ export default defineConfig({
   plugins: [react()],
   test: {
     environment: "jsdom",
+    environmentOptions: {
+      jsdom: {
+        url: "http://localhost/",
+      },
+    },
     globals: true,
     setupFiles: ["./tests/setup.ts"],
     // MUST start from `configDefaults.exclude`. A bare `exclude` array REPLACES

@@ -227,6 +227,21 @@ CREATE TABLE IF NOT EXISTS bot_group_run_records (
     kind TEXT NOT NULL,
     payload TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_bot_group_run_records ON bot_group_run_records(run_id);
+
+CREATE TABLE IF NOT EXISTS bot_group_run_task_prompts (
+    task_id TEXT PRIMARY KEY REFERENCES bot_group_run_tasks(id) ON DELETE CASCADE,
+    instructions TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS swarm_run_reports (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    summary_json TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_swarm_run_reports_owner ON swarm_run_reports(user_id, created_at);
 
 -- ---------------------------------------------------------------------------
 -- SESSION RUNS / CHECKPOINTS — durable progress for long-running streams

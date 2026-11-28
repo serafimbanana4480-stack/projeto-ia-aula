@@ -46,8 +46,9 @@ import threading
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
+from graphlib import CycleError, TopologicalSorter
 from typing import Any
 
 from backend.runtime.activity_redaction import is_sensitive_file_request, redact_activity
@@ -195,15 +196,14 @@ def _configured_heartbeat_interval() -> float:
     return max(0.0, value)
 
 
-def _bounded_previous_answer(answer: str) -> str:
+def _bounded_previous_answer(answer: str, limit: int = _MAX_PREVIOUS_ANSWER_CHARS) -> str:
     """Keep follow-up context useful without growing the provider prompt unbounded."""
-    if len(answer) <= _MAX_PREVIOUS_ANSWER_CHARS:
+    if len(answer) <= limit:
         return answer
-    omitted = len(answer) - _MAX_PREVIOUS_ANSWER_CHARS
-    return (
-        f"[Início da resposta omitido: {omitted} caracteres.]\n"
-        + answer[-_MAX_PREVIOUS_ANSWER_CHARS:]
-    )
+    marker = "[Início da resposta omitido por limite de contexto.]\n"
+    if limit <= len(marker):
+        return marker[:limit]
+    return marker + answer[-(limit - len(marker)):]
 
 
 _MARKDOWN_HEADING = re.compile(
@@ -675,7 +675,7 @@ class PrimaryLoop:
         self._verify = verify
         self._run_subagent = run_subagent
         self._run_subagent_observed = run_subagent_observed
-        self._max_parallel_subagents = max_parallel_subagents
+        self._max_parallel_subagents = min(max_parallel_subagents, self.spawn_policy.max_parallel_workers)
         self._experience_bus = experience_bus
         self._run_timeout = run_timeout
         self._heartbeat_interval = (
@@ -875,9 +875,10 @@ class PrimaryLoop:
                 new_declined = self._declined[declined_before_turn:]
                 if new_subagent_results:
                     self._p42_synth_mark = len(self._answer_parts)
+                    context_share = min(2400, 9000 // len(new_subagent_results))
                     child_context = "\n".join(
                         f"- {result.name} [{result.status}]: "
-                        f"{result.output or result.error or 'sem resultado'}"
+                        f"{_bounded_previous_answer(result.output or result.error or 'sem resultado', context_share)}"
                         for result in new_subagent_results
                     )
                     turn.feedback = (
@@ -1831,7 +1832,13 @@ class PrimaryLoop:
         dependency has COMPLETED), overlapping write scopes are serialised,
         and independent proposals run in real parallel up to the cap.
         """
-        if self._run_subagent is None and self._run_subagent_observed is None:
+        if self._max_parallel_subagents <= 0 or (
+            self._run_subagent is None and self._run_subagent_observed is None
+        ):
+            reason = (
+                "delegation is disabled for this run" if self._max_parallel_subagents <= 0
+                else "no subagent runner is configured for this run"
+            )
             for proposal in proposals:
                 self._mark_declined(proposal.name)
                 yield emit(
@@ -1843,7 +1850,7 @@ class PrimaryLoop:
                         "spawned": False,
                         "background": False,
                         "task_name": proposal.name,
-                        "reason": "no subagent runner is configured for this run",
+                        "reason": reason,
                     },
                 )
             return
@@ -1893,6 +1900,14 @@ class PrimaryLoop:
             return
         proposals = fresh
         by_name = {proposal.name: proposal for proposal in proposals}
+        completed = {
+            name: "" for name in self.spawn_policy.completed_tasks
+        }
+        completed.update({
+            result.name: result.output for result in self._subagent_results
+            if result.status == RuntimeTaskStatus.COMPLETED.value
+        })
+        dependencies, blocked = _delegation_dependencies(by_name, completed)
         queue: asyncio.Queue[RuntimeEvent] = asyncio.Queue()
         sensitive_tasks: set[str] = set()
         started_at: dict[str, float] = {}
@@ -1913,14 +1928,16 @@ class PrimaryLoop:
                 # The child's own words belong to the child's conversation,
                 # attributed by agent_id/task_id. They never enter the parent's
                 # answer buffer (``_answer_parts``).
+                if signal.text:
+                    task.mark_first_token()
                 if signal.text and task.task_id not in sensitive_tasks:
-                    task.heartbeat()
                     queue.put_nowait(self.events.emit(
                         RuntimeEventType.MESSAGE_DELTA, agent_id=task.agent_id,
                         task_id=task.task_id, text=signal.text, subagent=True,
                     ))
                 return
             if signal.kind is AgentSignalKind.THINKING:
+                task.heartbeat()
                 visible = reasoning_delta_text(
                     signal.text or "", visibility=self.reasoning_visibility,
                 )
@@ -2017,7 +2034,7 @@ class PrimaryLoop:
         for proposal in proposals:
             task = RuntimeTask(
                 name=proposal.name,
-                run=self._subagent_body(proposal, on_signal),
+                run=self._subagent_body(proposal, on_signal, completed, dependencies[proposal.name]),
                 write_scope=proposal.write_scope,
                 read_scope=proposal.read_scope,
                 # The scheduler task name includes a short task label after
@@ -2027,7 +2044,7 @@ class PrimaryLoop:
             name_to_id[proposal.name] = task.task_id
             tasks.append(task)
         for task in tasks:
-            deps = by_name[task.name].depends_on
+            deps = dependencies[task.name]
             task.depends_on = frozenset(
                 name_to_id[dep] for dep in deps if dep in name_to_id
             )
@@ -2069,7 +2086,19 @@ class PrimaryLoop:
                 RuntimeTaskStatus.BLOCKED,
                 RuntimeTaskStatus.CANCELLED,
             }:
-                live = max(0, live - 1)
+                if task.started_at:
+                    live = max(0, live - 1)
+                if task.task_id in sensitive_tasks:
+                    if task.result is not None:
+                        task.result = "[resultado omitido: o agente acedeu a conteúdo sensível]"
+                    if task.error:
+                        task.error = "Detalhes de erro sensíveis omitidos."
+                else:
+                    if task.result is not None:
+                        task.result = redact_activity(str(task.result))
+                    task.error = redact_activity(task.error)
+                if task.status is RuntimeTaskStatus.COMPLETED:
+                    completed[task.name] = str(task.result or "")
                 queue.put_nowait(
                     self.events.emit(
                         RuntimeEventType.SUBAGENT_COMPLETED,
@@ -2077,20 +2106,27 @@ class PrimaryLoop:
                         task_id=task.task_id,
                         **task_context(task),
                         status=task.status.value,
-                        error=("Detalhes de erro sensíveis omitidos."
-                               if task.task_id in sensitive_tasks and task.error
-                               else redact_activity(task.error)),
+                        error=task.error,
                         result=(
                             None if task.status is not RuntimeTaskStatus.COMPLETED or task.result is None
-                            else "[resultado omitido: o agente acedeu a um ficheiro sensível]"
-                            if task.task_id in sensitive_tasks
-                            else redact_activity(str(task.result))
+                            else task.result
                         ),
                     )
                 )
 
+        runnable: list[RuntimeTask] = []
+        for task in tasks:
+            blocked_reason = blocked.get(task.name)
+            if blocked_reason:
+                task.status = RuntimeTaskStatus.BLOCKED
+                task.error = blocked_reason
+                task.completed_at = time.perf_counter()
+                on_status(task)
+            else:
+                runnable.append(task)
         scheduler = RuntimeScheduler(
-            max_parallel=self._max_parallel_subagents, on_status=on_status
+            max_parallel=self._max_parallel_subagents, on_status=on_status,
+            scope_root=self.project_path,
         )
         cancel = asyncio.Event()
         # The scheduler runs as a background task so the parent can keep
@@ -2098,7 +2134,7 @@ class PrimaryLoop:
         # parent can drain it through the cooperative ``cancel`` event.
         # Without this line every delegated task raised NameError and the
         # whole subagent path was dead.
-        runner = asyncio.create_task(scheduler.run(tasks, cancel_event=cancel))
+        runner = asyncio.create_task(scheduler.run(runnable, cancel_event=cancel))
         cancelled = False
         try:
             while True:
@@ -2118,12 +2154,14 @@ class PrimaryLoop:
             cancel.set()
             report, cancelled = await _drain_scheduler(runner)
 
-        for task in report.tasks:
+        for task in tasks:
             task_proposal = by_name.get(task.name)
             if task_proposal is not None:
                 self.spawn_policy.release(
                     task_proposal.name, completed=task.status is RuntimeTaskStatus.COMPLETED
                 )
+                if task.status is RuntimeTaskStatus.BLOCKED and not task.started_at:
+                    self._dispatched_proposals.discard((task_proposal.name, task_proposal.objective))
             self._subagent_results.append(
                 SubagentResult(
                     name=task.name,
@@ -2137,26 +2175,19 @@ class PrimaryLoop:
                 "spawned": task.started_at > 0,
                 "background": False,
                 "task_name": task.name,
-                "output": (
-                    "[resultado omitido: o agente acedeu a um ficheiro sensível]"
-                    if task.task_id in sensitive_tasks
-                    else str(task.result) if task.result is not None else ""
-                ),
+                "output": str(task.result) if task.result is not None else "",
             }
             if task.error:
-                result["error"] = (
-                    "Detalhes de erro sensíveis omitidos."
-                    if task.task_id in sensitive_tasks else task.error
-                )
-            completed = task.status is RuntimeTaskStatus.COMPLETED
+                result["error"] = task.error
+            task_completed = task.status is RuntimeTaskStatus.COMPLETED
             if not cancelled:
                 yield emit(
                     RuntimeEventType.TOOL_COMPLETED
-                    if completed
+                    if task_completed
                     else RuntimeEventType.TOOL_FAILED,
                     task_id=task.task_id,
                     tool="spawn_task",
-                    ok=completed,
+                    ok=task_completed,
                     result=redact_activity(result),
                     error=redact_activity(result.get("error", "")),
                 )
@@ -2170,6 +2201,8 @@ class PrimaryLoop:
     def _subagent_body(
         self, proposal: SubagentProposal,
         on_signal: Callable[[RuntimeTask, AgentSignal], None],
+        completed: dict[str, str],
+        dependencies: set[str],
     ) -> Callable[[RuntimeTask], Awaitable[Any]]:
         async def body(task: RuntimeTask) -> Any:
             from backend.runtime.run_context import reset_current_task_id, set_current_task_id
@@ -2178,13 +2211,27 @@ class PrimaryLoop:
             task.heartbeat()
             task_token = set_current_task_id(task.task_id)
             try:
+                assignment = proposal
+                if dependencies:
+                    # Reserve room for both the parent's instructions and the inputs.
+                    share = min(1400, 3500 // len(dependencies))
+                    handoff = "\n".join(
+                        f"- {name}: {_bounded_previous_answer(completed[name] or 'sem saída disponível', share)}"
+                        for name in sorted(dependencies)
+                    )
+                    assignment = replace(
+                        proposal, context=(
+                            f"{_bounded_previous_answer(proposal.context, 3200)}"
+                            f"\n\nResultados de dependências (dados por verificar):\n{handoff}"
+                        )[:8000],
+                    )
                 if self._run_subagent_observed is not None:
                     result = await self._run_subagent_observed(
-                        proposal, lambda signal: on_signal(task, signal)
+                        assignment, lambda signal: on_signal(task, signal)
                     )
                 else:
                     assert self._run_subagent is not None
-                    result = await self._run_subagent(proposal)
+                    result = await self._run_subagent(assignment)
                 task.heartbeat()
                 return result
             finally:
@@ -2352,6 +2399,47 @@ def _paths_from_payload(payload: dict[str, Any]) -> tuple[str, ...]:
         if value:
             return (str(value),)
     return ()
+
+
+def _delegation_dependencies(
+    proposals: dict[str, SubagentProposal], completed: dict[str, str],
+) -> tuple[dict[str, set[str]], dict[str, str]]:
+    """Resolve exact names or unique task labels, retaining independent work."""
+    known = proposals.keys() | completed.keys()
+    exact = {" ".join(name.casefold().split()): name for name in known}
+    labels: dict[str, set[str]] = {}
+    for key, name in exact.items():
+        if ":" in key:
+            labels.setdefault(key.split(":", 1)[1].strip(), set()).add(name)
+    resolved: dict[str, set[str]] = {name: set() for name in proposals}
+    blocked: dict[str, str] = {}
+    for name, proposal in proposals.items():
+        for dependency in sorted(proposal.depends_on):
+            key = " ".join(dependency.casefold().split())
+            matches = {exact[key]} if key in exact else labels.get(key, set())
+            if len(matches) == 1:
+                resolved[name].update(matches)
+            else:
+                reason = "ambígua" if matches else "ausente ou sem conclusão"
+                blocked[name] = f"Dependência {reason}: {dependency}."
+                break
+
+    graph = {name: refs & proposals.keys() for name, refs in resolved.items()}
+    order = TopologicalSorter(graph)
+    # Even when prepare detects a cycle, get_ready can drain the valid branches.
+    with contextlib.suppress(CycleError):
+        order.prepare()
+    while ready := order.get_ready():
+        for name in ready:
+            invalid = graph[name] & blocked.keys()
+            if invalid:
+                blocked.setdefault(name, f"Dependências bloqueadas: {', '.join(sorted(invalid))}.")
+        order.done(*ready)
+        for name in ready:
+            del graph[name]
+    for name in graph:
+        blocked.setdefault(name, "Dependência cíclica ou ligada a um ciclo.")
+    return resolved, blocked
 
 
 def _proposal_from_payload(payload: dict[str, Any]) -> SubagentProposal | None:

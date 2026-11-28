@@ -12,6 +12,7 @@ from backend.middleware.auth import create_access_token
 from backend.orchestrator.main import app
 from backend.orchestrator.routes import bot_groups as routes
 from backend.persistence import bot_group_runs
+from backend.persistence.db import close_pool, init_db
 
 
 def auth(user: str) -> dict[str, str]:
@@ -26,7 +27,7 @@ async def test_run_survives_request_and_scopes_evidence(monkeypatch: pytest.Monk
     prompts: list[list[dict[str, str]]] = []
 
     class Provider:
-        async def chat_stream(self, model: str, messages: list[dict[str, str]]):
+        async def chat_stream(self, model: str, messages: list[dict[str, str]], **_options: Any):
             prompts.append(messages)
             if model == 'first':
                 entered.set()
@@ -86,3 +87,100 @@ def test_restart_marks_unfinished_without_replaying() -> None:
     assert run['status'] == 'interrupted'
     assert [task['status'] for task in run['tasks']] == ['interrupted', 'interrupted']
     assert run['records'] == []
+
+
+@pytest.mark.asyncio
+async def test_resume_keeps_completed_bots_and_original_evidence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    source = tmp_path / "module.txt"
+    source.write_text("evidência original", encoding="utf-8")
+    reviews_running = asyncio.Event()
+    allow_resume = asyncio.Event()
+    calls: list[str] = []
+    resumed = False
+
+    class Provider:
+        async def chat_stream(
+            self, model: str, messages: list[dict[str, str]], *, options: dict, run_id: str,
+        ):
+            assert options["max_tokens"] == routes._OUTPUT_TOKENS
+            assert run_id
+            calls.append(model)
+            assert "evidência original" in messages[1]["content"]
+            assert "ficheiro alterado" not in messages[1]["content"]
+            if model == "lead":
+                yield "diagnóstico"
+                return
+            assert "diagnóstico" in messages[1]["content"]
+            assert f"instruções {model}" in messages[0]["content"]
+            if not resumed:
+                if len(calls) == 4:
+                    reviews_running.set()
+                await reviews_running.wait()
+                if model != "ready":
+                    await asyncio.Event().wait()
+            else:
+                await allow_resume.wait()
+            yield f"revisão {model}"
+
+    async def resolve(_selection: Any, _client: Any):
+        return Provider(), None
+
+    monkeypatch.setattr(routes, "_request_provider_client", resolve)
+    monkeypatch.setattr(routes, "_resolve_project_root", lambda *_args: tmp_path)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test", headers=auth("alice"),
+    ) as client:
+        ids = []
+        for model in ("lead", "ready", "pending-a", "pending-b"):
+            response = await client.post("/api/bots", json={
+                "name": model, "provider": "lmstudio", "model": model, "instructions": f"instruções {model}",
+            })
+            assert response.status_code == 201
+            ids.append(response.json()["id"])
+        group = (await client.post("/api/bot-groups", json={"name": "Group", "bot_ids": ids})).json()["id"]
+        endpoint = f"/api/bot-groups/{group}/runs"
+        request = {"message": "Revê o módulo", "file_path": source.name}
+        invalid = await client.post(endpoint, json={**request, "file_path": ".env"})
+        assert invalid.status_code == 400
+        response = await client.post(endpoint, json=request)
+        assert response.status_code == 202, response.text
+        run_url = f"{endpoint}/{response.json()['id']}"
+        await asyncio.wait_for(reviews_running.wait(), 4)
+        assert (await client.post(endpoint, json=request)).status_code == 409
+        assert (await client.post(f"{run_url}/interrupt", headers=auth("bob"))).status_code == 404
+        assert (await client.post(f"{run_url}/interrupt")).status_code == 200
+        close_pool()
+        init_db()
+        run = (await client.get(run_url)).json()
+        assert run["can_resume"] is True
+        assert [task["status"] for task in run["tasks"]] == [
+            "completed", "completed", "interrupted", "interrupted",
+        ]
+        assert "instructions" not in run["tasks"][0]
+
+        source.write_text("ficheiro alterado", encoding="utf-8")
+        changed = await client.patch(f"/api/bots/{ids[2]}", json={"instructions": "novas instruções"})
+        assert changed.status_code == 200
+        assert (await client.post(f"{run_url}/resume", headers=auth("bob"))).status_code == 404
+        resumed = True
+        assert (await client.post(f"{run_url}/resume")).status_code == 202
+        assert (await client.post(f"{run_url}/resume")).status_code == 409
+        allow_resume.set()
+        for _ in range(100):
+            run = (await client.get(run_url)).json()
+            if run["status"] == "completed":
+                break
+            await asyncio.sleep(.01)
+        assert run["status"] == "completed", run
+        assert [task["result"] for task in run["tasks"]] == [
+            "diagnóstico", "revisão ready", "revisão pending-a", "revisão pending-b",
+        ]
+        assert len([record for record in run["records"] if record["kind"] == "tool_call"]) == 1
+        read = next(record for record in run["records"] if record["kind"] == "tool_result")
+        assert len(read["payload"]["sha256"]) == 64
+        assert calls.count("lead") == calls.count("ready") == 1
+        summary = (await client.get(endpoint, params={"include_evidence": "false"})).json()["runs"][0]
+        assert summary["records"] == []
+        assert all(task["result"] is None for task in summary["tasks"])
